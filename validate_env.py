@@ -108,18 +108,19 @@ try:
 except Exception as e:
     check("MissionMemory", str(e)[:60], False)
 
-# ── 7. ToolExecutor ──────────────────────────────────────────────────
+# ── 7. DynamicToolManager ─────────────────────────────────────────────
 try:
-    from mcp.tool_executor import ToolExecutor
-    te = ToolExecutor()
-    found = []
-    for t in ["nmap","gobuster","hydra","sqlmap","nikto","searchsploit",
-              "ffuf","wpscan","john","hashcat","enum4linux","smbclient"]:
-        if shutil.which(t) or (BASE/"tools"/t).exists():
-            found.append(t)
-    check("ToolExecutor", f"{len(found)}/12 key tools found: {','.join(found[:6])}...", len(found) >= 8)
+    from mcp.tool_manager import DynamicToolManager
+    tm = DynamicToolManager()
+    key_tools = ["nmap","gobuster","hydra","sqlmap","nikto","searchsploit",
+                 "ffuf","wpscan","john","hashcat","enum4linux","smbclient"]
+    found = [t for t in key_tools if tm.find(t)]
+    check("DynamicToolManager",
+          f"{tm.session_report()['total_discovered']} total discovered | "
+          f"{len(found)}/12 key tools: {','.join(found[:6])}...",
+          len(found) >= 8)
 except Exception as e:
-    check("ToolExecutor", str(e)[:60], False)
+    check("DynamicToolManager", str(e)[:60], False)
 
 # ── 8. MCP filesystem server ─────────────────────────────────────────
 mcp_path = shutil.which("mcp-server-filesystem")

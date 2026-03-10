@@ -1,0 +1,56 @@
+# Environment
+.env
+*.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Logs & Reports (may contain sensitive pentest data)
+logs/
+reports/
+
+# ChromaDB — large binary/data store, not for git
+memory/
+~/CyberAgent/memory/
+knowledge_base/chroma_db/
+knowledge_base/chroma_db
+
+# Large knowledge base raw data (re-downloadable)
+knowledge_base/cve/
+knowledge_base/mitre_attack.json
+knowledge_base/owasp_wstg.md
+knowledge_base/linux_privesc.md
+
+# Cloned external repos (embedded git repos — use submodules or re-clone)
+knowledge_base/PayloadsAllTheThings/
+knowledge_base/SecLists/
+knowledge_base/gtfobins/
+knowledge_base/hacktricks/
+knowledge_base/nuclei-templates/
+knowledge_base/InternalAllTheThings/
+
+# Tools (large binaries)
+tools/subfinder
+tools/linpeas.sh
+tools/theHarvester/
+tools/theHarvester.sh
+
+# Discovered tools cache (auto-generated on startup)
+config/tools_discovered.json
+
+# Ollama models (managed separately)
+*.gguf
+*.bin
+
+# OS
+.DS_Store
+*.swp
+
+# Mission state (sensitive pentest data)
+memory/missions/

@@ -34,7 +34,7 @@ mm.log_action("recon_agent", "nmap -sV 10.0.0.1", "2 open ports found")
 ctx = mm.get_full_context()          # inject into LLM system prompt
 
 # Pentest tool execution
-from src.mcp.tool_executor import ToolExecutor
+from src.mcp.tool_manager import DynamicToolManager
 te = ToolExecutor(mission_memory=mm)
 ports = te.run_nmap("10.0.0.1", flags="-sV -sC -p-")
 creds = te.run_hydra("10.0.0.1", "ssh", "users.txt", "rockyou.txt")

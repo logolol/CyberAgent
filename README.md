@@ -176,7 +176,7 @@ CyberAgent/
 │   │   ├── chroma_manager.py    # ChromaDB client + cross-collection RAG search
 │   │   └── mission_memory.py    # Per-target attack state (JSON + ChromaDB)
 │   ├── mcp/
-│   │   ├── tool_executor.py     # All pentest tool subprocess wrappers
+│   │   ├── tool_manager.py      # DynamicToolManager: auto-discover, install & execute tools
 │   │   ├── shodan_wrapper.py    # Shodan free-tier: host lookup, CVE search
 │   │   └── fetch_wrapper.py     # HTTP fetch for OSINT recon
 │   ├── agents/                  # 🔜 Next: 8 CrewAI agents
