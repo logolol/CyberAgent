@@ -110,17 +110,45 @@ except Exception as e:
 
 # ── 7. DynamicToolManager ─────────────────────────────────────────────
 try:
-    from mcp.tool_manager import DynamicToolManager
+    from mcp.tool_manager import DynamicToolManager, APT_ALIASES, GO_INSTALL_MAP, PIP_INSTALL_MAP
     tm = DynamicToolManager()
+    report = tm.session_report()
+    total = report["total_discovered"]
+
+    # 1. Total discovered >= 200
+    assert total >= 200, f"Only {total} tools discovered"
+
+    # 2. Auto-install pipeline maps registered
+    assert len(APT_ALIASES) >= 5, "APT_ALIASES too small"
+    assert len(GO_INSTALL_MAP) >= 5, "GO_INSTALL_MAP too small"
+    assert len(PIP_INSTALL_MAP) >= 3, "PIP_INSTALL_MAP too small"
+
+    # 3. configure_for_attack returns non-empty list for a simple SSH context
+    ssh_ctx = {
+        "target": "127.0.0.1", "service": "ssh", "port": 22,
+        "purpose": "banner grab SSH version",
+        "known_info": "unknown", "stealth": True, "timeout": 30,
+    }
+    cfg_args = tm.configure_for_attack("nmap", ssh_ctx)
+    assert isinstance(cfg_args, list) and len(cfg_args) > 0, \
+        f"configure_for_attack returned empty/invalid: {cfg_args}"
+
+    # 4. use_intelligent exists and is callable
+    assert callable(getattr(tm, "use_intelligent", None)), "use_intelligent not callable"
+
+    # 5. session_report total_discovered >= 200
+    assert report["total_discovered"] >= 200
+
+    # 6. Key tools present
     key_tools = ["nmap","gobuster","hydra","sqlmap","nikto","searchsploit",
                  "ffuf","wpscan","john","hashcat","enum4linux","smbclient"]
     found = [t for t in key_tools if tm.find(t)]
+
     check("DynamicToolManager",
-          f"{tm.session_report()['total_discovered']} total discovered | "
-          f"{len(found)}/12 key tools: {','.join(found[:6])}...",
+          f"{total} tools discovered | configure_for_attack: OK | {len(found)}/12 key tools",
           len(found) >= 8)
 except Exception as e:
-    check("DynamicToolManager", str(e)[:60], False)
+    check("DynamicToolManager", str(e)[:80], False)
 
 # ── 8. MCP filesystem server ─────────────────────────────────────────
 mcp_path = shutil.which("mcp-server-filesystem")

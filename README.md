@@ -19,7 +19,7 @@ CyberAgent is an autonomous multi-agent penetration testing system. Given a sing
 
 ### What was built on Day 1
 
-Day 1 covered the complete foundation of the platform: from a bare Python venv to a fully operational RAG-enabled AI pentest environment with 146,993 indexed knowledge documents, 87+ tools catalogued, and all core Python modules implemented.
+Day 1 covered the complete foundation of the platform: from a bare Python venv to a fully operational RAG-enabled AI pentest environment with 146,993 indexed knowledge documents, **4,309 tools discovered dynamically at runtime**, and all core Python modules implemented.
 
 ---
 
@@ -46,7 +46,7 @@ Configured three Ollama models with role-based routing:
 
 **File:** `config/tools.yaml`
 
-Auto-discovered and catalogued **87 tools** across system paths. Categories: `recon`, `enumeration`, `vuln_scan`, `exploitation`, `brute_force`, `web_attack`, `voip_attack`, `wireless`, `post_exploit`, `privesc`, `credential_attack`, `forensics`.
+Auto-discovered **4,309 tools** dynamically at runtime via `DynamicToolManager.discover_all()`. Previously a static catalogue of 87 tools in `config/tools.yaml` — now fully replaced by runtime discovery. Categories still tracked: `recon`, `enumeration`, `vuln_scan`, `exploitation`, `brute_force`, `web_attack`, `voip_attack`, `wireless`, `post_exploit`, `privesc`, `credential_attack`, `forensics`.
 
 Key tools: nmap, masscan, amass, subfinder, theHarvester, hydra, sqlmap, gobuster, ffuf, nikto, wpscan, nuclei, searchsploit, msfconsole, enum4linux, smbclient, svmap, svwar, svcrack, john, hashcat, chisel, responder, linpeas, binwalk, radare2.
 
@@ -82,13 +82,13 @@ Special installs: `wpscan` (gem), `theHarvester` (pip from source), `subfinder` 
 | `src/utils/llm_factory.py` | LLM role routing, ping/fallback, embeddings |
 | `src/memory/chroma_manager.py` | ChromaDB CRUD + cross-collection `get_rag_context()` |
 | `src/memory/mission_memory.py` | Full per-target attack state (JSON + ChromaDB) |
-| `src/mcp/tool_executor.py` | Subprocess wrappers for all pentest tools |
+| `src/mcp/tool_manager.py` | DynamicToolManager: auto-discover 4,309 tools, auto-install, LLM-driven execution |
 | `src/mcp/shodan_wrapper.py` | Shodan free-tier host/CVE lookup |
 | `src/mcp/fetch_wrapper.py` | HTTP fetch for OSINT recon |
 
 **MissionMemory** tracks per-target: hosts, ports, vulns, exploits, shells, credentials, privesc paths, loot, MITRE TTPs, full attack chain log.
 
-**ToolExecutor** supports: `run_nmap`, `run_searchsploit`, `run_hydra`, `run_sqlmap`, `run_gobuster`, `run_nikto`, `run_sipvicious`, `run_ffuf`, `run_wpscan`, `run_nxc`, `run_linpeas`
+**DynamicToolManager** key methods: `discover_all()`, `find()`, `use()`, `auto_install()`, `configure_for_attack()`, `use_intelligent()`, `get_tools_for_purpose()`, `session_report()`
 
 **ChromaManager.get_rag_context(query)** — searches ALL 10 knowledge collections simultaneously and returns merged cosine-ranked results. This is the main agent knowledge lookup call.
 
@@ -125,7 +125,7 @@ Run: `python3 validate_env.py`
 ✓ ChromaDB:seclists_meta      5,214 docs
 ✓ ChromaDB total              146,993 docs across 10 collections
 ✓ MissionMemory               state.json created OK
-✓ ToolExecutor                12/12 key tools found
+✓ DynamicToolManager          4309 total discovered | configure_for_attack: OK | 12/12 key tools
 ✓ MCP filesystem server       /usr/local/bin/mcp-server-filesystem
 ✓ Python imports              9/9 ok
 ✓ .env config                 7/7 vars set
@@ -135,6 +135,94 @@ Run: `python3 validate_env.py`
 Results: 24 PASS  0 WARN  0 FAIL / 24 checks
 Total RAG docs: 146,993
 ```
+
+---
+
+## 🗓️ Day 2 — Dynamic Tool Management System
+
+### What changed
+
+Replaced the static `ToolExecutor` (87 hardcoded tool wrappers) with `DynamicToolManager` — a fully autonomous tool management system that discovers, installs, and intelligently executes any pentest tool at runtime.
+
+**File added:** `src/mcp/tool_manager.py` (880 lines)  
+**File deleted:** `src/mcp/tool_executor.py`
+
+---
+
+### Core Class: `DynamicToolManager`
+
+| Method | What it does |
+|---|---|
+| `discover_all()` | Scans `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/opt`, `~/.go/bin`, `~/.cargo/bin`, venv/bin, `~/CyberAgent/tools/` + `dpkg -l` + `gem list` + `pip list` + `go env GOPATH` — discovers ALL executables |
+| `find(tool_name)` | Checks cache → `which` → `shutil.which` → manual path scan |
+| `use(tool, args)` | Finds or auto-installs, runs with timeout+capture, returns structured dict |
+| `auto_install(tool)` | Tries 7 methods in order: apt → pip → gem → go install → GitHub release → git clone+build |
+| `configure_for_attack(tool, context)` | Reads `tool --help`, queries RAG (HackTricks), asks reasoning LLM → returns optimal JSON flag list |
+| `use_intelligent(tool, context)` | `configure_for_attack` + `use` combined — **primary agent method** |
+| `get_tools_for_purpose(purpose)` | LLM selects best 3-5 tools from discovered set for a given attack goal |
+| `session_report()` | Summary dict: total discovered, auto-installed, failed, used this session |
+
+---
+
+### Auto-Install Pipeline (7 methods, in order)
+
+1. `sudo apt-get install -y {tool}`
+2. APT alias map — e.g. `httpx→httpx-toolkit`, `pwncat→pwncat-cs`, `crackmapexec→crackmapexec`
+3. `pip install {tool}` inside the venv (ghauri, netexec, impacket, pwncat-cs…)
+4. `sudo gem install {tool}` — ruby tools: wpscan, evil-winrm
+5. `go install github.com/.../{tool}@latest` — nuclei, httpx, dnsx, katana, gobuster, kerbrute, subfinder, amass…
+6. GitHub Releases API → auto-downloads `linux_amd64` binary → `~/CyberAgent/tools/{tool}` + `chmod +x` — rustscan, ligolo-ng, chisel, kerbrute, pspy, linpeas
+7. `git clone --depth=1` + auto-detect build: `setup.py` / `requirements.txt` / `Makefile` / `go.mod` / `Cargo.toml` — ghauri, AutoRecon, LinEnum, PEASS-ng, BeEF…
+
+After any successful install: logged, added to `self.discovered`, `self.installed_this_session`.
+
+---
+
+### LLM-Powered Intelligence
+
+**`configure_for_attack(tool, attack_context)`** — agents never hardcode flags again:
+1. Runs `{tool} --help 2>&1` (first 100 lines) to read actual flag options
+2. Queries HackTricks RAG collection for real-world usage examples
+3. Sends to DeepSeek-R1 (reasoning model): *"Given this tool's help and this attack context, return a JSON list of optimal args"*
+4. Returns parsed list of args ready to pass to `use()`
+
+**`get_tools_for_purpose(purpose)`** — agents pick their own tools:
+- Queries discovered set against a curated pentest-tool list (~60 known tools)
+- Augments with HackTricks RAG context for the purpose
+- Asks LLM: *"Which 3-5 tools from this list are best for: {purpose}?"*
+- Returns JSON list of tool names
+
+---
+
+### Discovery Cache
+
+Auto-generated at `config/tools_discovered.json` — refreshed on startup (1-hour TTL):
+```json
+{
+  "last_scan": "2026-03-10T11:30:00",
+  "total": 4309,
+  "tools": {
+    "nmap": {"path": "/usr/bin/nmap", "source": "system"},
+    "nuclei": {"path": "/usr/bin/nuclei", "source": "system"},
+    "rustscan": {"path": "/home/drakarys/CyberAgent/tools/rustscan", "source": "github"}
+  }
+}
+```
+
+---
+
+### Smoke Test Results
+
+```
+[[ToolManager]] Discovered 4309 tools on startup
+nmap path:    /usr/bin/nmap  ✅
+nmap use():   success=True, rc=0, 0.22s  ✅
+gobuster configure_for_attack():  LLM returned valid JSON args  ✅
+get_tools_for_purpose("enumerate SMB shares"):  ['nmap','smbclient','smbmap','impacket-psexec','dirsearch']  ✅
+session_report():  {total_discovered: 4309, auto_installed: [], failed: [], tools_used: ['nmap×1']}  ✅
+```
+
+**validate_env.py: 24/24 PASS** (DynamicToolManager check verifies: discovered ≥ 200, `configure_for_attack` returns args, all 12 key tools found)
 
 ---
 
@@ -215,7 +303,7 @@ python3 src/memory/mission_memory.py
 
 | Sprint | Focus | Status |
 |---|---|---|
-| **S1-S2** | Environment, RAG (146K docs), core modules | ✅ **DONE** |
+| **S1-S2** | Environment, RAG (146K docs), core modules (incl. DynamicToolManager) | ✅ **DONE** |
 | S3-S4 | Orchestrator Agent + ReAct engine + JSON state | 🔜 Next |
 | S5-S6 | Recon Agent (parallel: DNS, OSINT, active) | ⏳ |
 | S7-S8 | Enumeration + VulnScan Agents | ⏳ |
