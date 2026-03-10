@@ -1,0 +1,600 @@
+total_tools: 98
+installed_count: 87
+scan_paths:
+- /usr/sbin
+- /usr/local/bin
+- /usr/local/sbin
+- /snap/bin
+- /home/drakarys/.local/bin
+- /home/drakarys/CyberAgent/.venv/bin
+- /home/drakarys/CyberAgent/tools
+tools:
+- name: nmap
+  binary_path: /usr/bin/nmap
+  category: recon
+  purpose: TCP/UDP port scanner and service fingerprinting
+  example_command: nmap -sV -sC -p- {target}
+  installed: true
+- name: masscan
+  binary_path: /usr/bin/masscan
+  category: recon
+  purpose: Ultra-fast TCP port scanner
+  example_command: masscan -p1-65535 --rate=10000 {target}
+  installed: true
+- name: amass
+  binary_path: /usr/bin/amass
+  category: recon
+  purpose: Subdomain enumeration via passive/active OSINT
+  example_command: amass enum -d {domain}
+  installed: true
+- name: subfinder
+  binary_path: /home/drakarys/CyberAgent/tools/subfinder
+  category: recon
+  purpose: Passive subdomain discovery via APIs
+  example_command: subfinder -d {domain}
+  installed: true
+- name: theHarvester
+  binary_path: /home/drakarys/CyberAgent/.venv/bin/theHarvester
+  category: recon
+  purpose: OSINT emails/subdomains/IPs from search engines
+  example_command: theHarvester -d {domain} -b all
+  installed: true
+- name: dnsx
+  binary_path: NOT FOUND
+  category: recon
+  purpose: DNS resolution and bruteforce at scale
+  example_command: dnsx -l subdomains.txt -a -resp
+  installed: false
+- name: dnsrecon
+  binary_path: /usr/bin/dnsrecon
+  category: recon
+  purpose: DNS enumeration and zone transfer
+  example_command: dnsrecon -d {domain} -t axfr
+  installed: true
+- name: dnsenum
+  binary_path: /usr/bin/dnsenum
+  category: recon
+  purpose: DNS enumeration with brute-force
+  example_command: dnsenum {domain}
+  installed: true
+- name: fierce
+  binary_path: /usr/bin/fierce
+  category: recon
+  purpose: DNS reconnaissance and subdomain brute-force
+  example_command: fierce --domain {domain}
+  installed: true
+- name: dnsmap
+  binary_path: /usr/bin/dnsmap
+  category: recon
+  purpose: DNS subdomain brute-force mapping
+  example_command: dnsmap {domain}
+  installed: true
+- name: whois
+  binary_path: /usr/bin/whois
+  category: recon
+  purpose: Domain/IP WHOIS registration lookup
+  example_command: whois {domain}
+  installed: true
+- name: host
+  binary_path: /usr/bin/host
+  category: recon
+  purpose: DNS query utility
+  example_command: host {domain}
+  installed: true
+- name: dig
+  binary_path: /usr/bin/dig
+  category: recon
+  purpose: DNS lookup tool with detailed output
+  example_command: dig {domain} ANY
+  installed: true
+- name: nslookup
+  binary_path: /usr/bin/nslookup
+  category: recon
+  purpose: DNS query tool (interactive/batch)
+  example_command: nslookup {domain}
+  installed: true
+- name: spiderfoot
+  binary_path: NOT FOUND
+  category: recon
+  purpose: Automated OSINT collection framework
+  example_command: spiderfoot -s {target} -m all
+  installed: false
+- name: enum4linux
+  binary_path: /usr/bin/enum4linux
+  category: enumeration
+  purpose: SMB/NetBIOS enumeration for Linux/Windows
+  example_command: enum4linux -a {target}
+  installed: true
+- name: enum4linux-ng
+  binary_path: /usr/bin/enum4linux-ng
+  category: enumeration
+  purpose: Modern Python rewrite of enum4linux
+  example_command: enum4linux-ng -A {target}
+  installed: true
+- name: smbclient
+  binary_path: /usr/bin/smbclient
+  category: enumeration
+  purpose: SMB share browser and file access
+  example_command: smbclient -L //{target}
+  installed: true
+- name: smbmap
+  binary_path: /usr/bin/smbmap
+  category: enumeration
+  purpose: SMB share enumeration with permissions
+  example_command: smbmap -H {target}
+  installed: true
+- name: rpcclient
+  binary_path: /usr/bin/rpcclient
+  category: enumeration
+  purpose: RPC endpoint enumeration via null session
+  example_command: rpcclient -U '' {target}
+  installed: true
+- name: ldapsearch
+  binary_path: /usr/bin/ldapsearch
+  category: enumeration
+  purpose: LDAP directory search and dump
+  example_command: ldapsearch -x -H ldap://{target}
+  installed: true
+- name: onesixtyone
+  binary_path: /usr/bin/onesixtyone
+  category: enumeration
+  purpose: Fast SNMP community string brute-force
+  example_command: onesixtyone -c community.txt {target}
+  installed: true
+- name: snmpwalk
+  binary_path: /usr/bin/snmpwalk
+  category: enumeration
+  purpose: SNMP MIB tree walker
+  example_command: snmpwalk -c public -v1 {target}
+  installed: true
+- name: snmpcheck
+  binary_path: /usr/bin/snmpcheck
+  category: enumeration
+  purpose: SNMP enumeration with formatted output
+  example_command: snmpcheck -t {target}
+  installed: true
+- name: whatweb
+  binary_path: /usr/bin/whatweb
+  category: enumeration
+  purpose: Web application fingerprinting
+  example_command: whatweb {url}
+  installed: true
+- name: wafw00f
+  binary_path: /usr/bin/wafw00f
+  category: enumeration
+  purpose: Web Application Firewall detection
+  example_command: wafw00f {url}
+  installed: true
+- name: sslscan
+  binary_path: /usr/bin/sslscan
+  category: enumeration
+  purpose: SSL/TLS cipher and certificate enumeration
+  example_command: sslscan {target}
+  installed: true
+- name: ssh-audit
+  binary_path: NOT FOUND
+  category: enumeration
+  purpose: SSH server security audit
+  example_command: ssh-audit {target}
+  installed: false
+- name: nikto
+  binary_path: /usr/bin/nikto
+  category: vuln_scan
+  purpose: Web server vulnerability scanner
+  example_command: nikto -h {url}
+  installed: true
+- name: wpscan
+  binary_path: /usr/local/bin/wpscan
+  category: vuln_scan
+  purpose: WordPress vulnerability and user enumeration
+  example_command: wpscan --url {url} --enumerate u
+  installed: true
+- name: joomscan
+  binary_path: /usr/bin/joomscan
+  category: vuln_scan
+  purpose: Joomla CMS vulnerability scanner
+  example_command: joomscan -u {url}
+  installed: true
+- name: nuclei
+  binary_path: NOT FOUND
+  category: vuln_scan
+  purpose: Template-based vulnerability scanner
+  example_command: nuclei -u {url} -t cves/
+  installed: false
+- name: searchsploit
+  binary_path: /usr/bin/searchsploit
+  category: vuln_scan
+  purpose: Offline Exploit-DB exploit search
+  example_command: searchsploit {query}
+  installed: true
+- name: msfconsole
+  binary_path: /usr/bin/msfconsole
+  category: vuln_scan
+  purpose: Metasploit Framework main console
+  example_command: msfconsole -q
+  installed: true
+- name: zaproxy
+  binary_path: /usr/bin/zaproxy
+  category: vuln_scan
+  purpose: OWASP ZAP web application proxy scanner
+  example_command: zaproxy -quickurl {url}
+  installed: true
+- name: msfvenom
+  binary_path: /usr/bin/msfvenom
+  category: exploitation
+  purpose: Payload/shellcode generator (Metasploit)
+  example_command: msfvenom -p linux/x64/shell_reverse_tcp LHOST={ip} LPORT=4444 -f
+    elf
+  installed: true
+- name: sqlmap
+  binary_path: /usr/bin/sqlmap
+  category: exploitation
+  purpose: Automated SQL injection and DB takeover
+  example_command: sqlmap -u {url} --dbs
+  installed: true
+- name: sqlninja
+  binary_path: /usr/bin/sqlninja
+  category: exploitation
+  purpose: MS SQL Server exploitation toolkit
+  example_command: sqlninja -m t -f sqlninja.conf
+  installed: true
+- name: commix
+  binary_path: /usr/bin/commix
+  category: exploitation
+  purpose: OS command injection exploiter
+  example_command: commix --url={url}
+  installed: true
+- name: impacket-psexec
+  binary_path: /usr/bin/impacket-psexec
+  category: exploitation
+  purpose: Remote code exec via SMB (Impacket)
+  example_command: impacket-psexec domain/user:pass@{target}
+  installed: true
+- name: impacket-secretsdump
+  binary_path: /usr/bin/impacket-secretsdump
+  category: exploitation
+  purpose: Remote SAM/NTDS secrets dump
+  example_command: impacket-secretsdump domain/user:pass@{target}
+  installed: true
+- name: impacket-smbserver
+  binary_path: /usr/bin/impacket-smbserver
+  category: exploitation
+  purpose: Rogue SMB server for relay attacks
+  example_command: impacket-smbserver share /tmp
+  installed: true
+- name: evil-winrm
+  binary_path: /usr/bin/evil-winrm
+  category: exploitation
+  purpose: WinRM shell for pentesting
+  example_command: evil-winrm -i {target} -u {user} -p {pass}
+  installed: true
+- name: nxc
+  binary_path: /usr/bin/nxc
+  category: exploitation
+  purpose: NetExec (CrackMapExec successor)
+  example_command: nxc smb {target} -u user -p pass
+  installed: true
+- name: setoolkit
+  binary_path: /usr/bin/setoolkit
+  category: exploitation
+  purpose: Social Engineering Toolkit
+  example_command: setoolkit
+  installed: true
+- name: hydra
+  binary_path: /usr/bin/hydra
+  category: brute_force
+  purpose: Network login brute-force (multi-protocol)
+  example_command: hydra -L users.txt -P pass.txt {target} ssh
+  installed: true
+- name: medusa
+  binary_path: /usr/bin/medusa
+  category: brute_force
+  purpose: Parallel network login brute-force
+  example_command: medusa -H hosts.txt -U users.txt -P pass.txt -M ssh
+  installed: true
+- name: patator
+  binary_path: NOT FOUND
+  category: brute_force
+  purpose: Modular brute-force framework
+  example_command: patator ssh_login host={target} user=FILE0 password=FILE1
+  installed: false
+- name: wfuzz
+  binary_path: /usr/bin/wfuzz
+  category: brute_force
+  purpose: Web fuzzer for parameters, dirs, auth
+  example_command: wfuzz -c -z file,wordlist.txt {url}/FUZZ
+  installed: true
+- name: fcrackzip
+  binary_path: /usr/bin/fcrackzip
+  category: brute_force
+  purpose: ZIP password cracker
+  example_command: fcrackzip -u -D -p wordlist.txt file.zip
+  installed: true
+- name: gobuster
+  binary_path: /usr/bin/gobuster
+  category: web_attack
+  purpose: Directory/DNS/vhost brute-force
+  example_command: gobuster dir -u {url} -w wordlist.txt
+  installed: true
+- name: ffuf
+  binary_path: /usr/bin/ffuf
+  category: web_attack
+  purpose: Fast web fuzzer for dirs/params/vhosts
+  example_command: ffuf -u {url}/FUZZ -w wordlist.txt
+  installed: true
+- name: dirb
+  binary_path: /usr/bin/dirb
+  category: web_attack
+  purpose: Web content scanner with recursive mode
+  example_command: dirb {url} wordlist.txt
+  installed: true
+- name: feroxbuster
+  binary_path: /usr/bin/feroxbuster
+  category: web_attack
+  purpose: Recursive forced browsing tool
+  example_command: feroxbuster -u {url} -w wordlist.txt
+  installed: true
+- name: dirbuster
+  binary_path: /usr/bin/dirbuster
+  category: web_attack
+  purpose: GUI-based web content brute-force
+  example_command: dirbuster
+  installed: true
+- name: svmap
+  binary_path: /usr/bin/svmap
+  category: voip_attack
+  purpose: SIP scanner — discover SIP servers
+  example_command: svmap {network}
+  installed: true
+- name: svwar
+  binary_path: /usr/bin/svwar
+  category: voip_attack
+  purpose: SIP extension enumerator
+  example_command: svwar -m INVITE -e 100-300 {target}
+  installed: true
+- name: svcrack
+  binary_path: /usr/bin/svcrack
+  category: voip_attack
+  purpose: SIP password cracker
+  example_command: svcrack -u 100 -d pass.txt {target}
+  installed: true
+- name: swaks
+  binary_path: /usr/bin/swaks
+  category: voip_attack
+  purpose: SMTP test tool / email relay testing
+  example_command: swaks --to victim@domain --from attacker@domain --server {target}
+  installed: true
+- name: smtp-user-enum
+  binary_path: /usr/bin/smtp-user-enum
+  category: voip_attack
+  purpose: SMTP user enumeration via VRFY/EXPN
+  example_command: smtp-user-enum -M VRFY -U users.txt -t {target}
+  installed: true
+- name: aircrack-ng
+  binary_path: /usr/bin/aircrack-ng
+  category: wireless
+  purpose: WEP/WPA/WPA2 key cracker
+  example_command: aircrack-ng -w wordlist.txt capture.cap
+  installed: true
+- name: airmon-ng
+  binary_path: /usr/sbin/airmon-ng
+  category: wireless
+  purpose: Wireless interface monitor mode manager
+  example_command: airmon-ng start wlan0
+  installed: true
+- name: airodump-ng
+  binary_path: /usr/sbin/airodump-ng
+  category: wireless
+  purpose: 802.11 packet capture and AP discovery
+  example_command: airodump-ng wlan0mon
+  installed: true
+- name: aireplay-ng
+  binary_path: /usr/sbin/aireplay-ng
+  category: wireless
+  purpose: 802.11 packet injection and deauth attacks
+  example_command: aireplay-ng -0 5 -a {bssid} wlan0mon
+  installed: true
+- name: bettercap
+  binary_path: /usr/bin/bettercap
+  category: wireless
+  purpose: Network attack and MITM framework
+  example_command: bettercap -iface eth0
+  installed: true
+- name: macchanger
+  binary_path: /usr/bin/macchanger
+  category: wireless
+  purpose: MAC address spoofing utility
+  example_command: macchanger -r {iface}
+  installed: true
+- name: socat
+  binary_path: /usr/bin/socat
+  category: post_exploit
+  purpose: Multipurpose relay (reverse shells, tunnels)
+  example_command: socat TCP-LISTEN:4444,reuseaddr EXEC:/bin/bash
+  installed: true
+- name: ncat
+  binary_path: NOT FOUND
+  category: post_exploit
+  purpose: Ncat — enhanced netcat (TLS, proxy support)
+  example_command: ncat -lv 4444
+  installed: false
+- name: netcat
+  binary_path: /usr/bin/netcat
+  category: post_exploit
+  purpose: Classic TCP/UDP connection utility
+  example_command: nc -lnvp 4444
+  installed: true
+- name: chisel
+  binary_path: /usr/bin/chisel
+  category: post_exploit
+  purpose: Fast TCP/UDP tunnel over HTTP via SSH
+  example_command: chisel server -p 8080 --reverse
+  installed: true
+- name: proxychains
+  binary_path: /usr/bin/proxychains
+  category: post_exploit
+  purpose: Force TCP traffic through SOCKS/HTTP proxy
+  example_command: proxychains nmap {target}
+  installed: true
+- name: iodine
+  binary_path: /usr/sbin/iodine
+  category: post_exploit
+  purpose: DNS tunneling for C2 over restrictive firewalls
+  example_command: iodine -f -P pass dns.{domain}
+  installed: true
+- name: sshuttle
+  binary_path: NOT FOUND
+  category: post_exploit
+  purpose: Transparent proxy VPN via SSH
+  example_command: sshuttle -r user@{target} 0/0
+  installed: false
+- name: responder
+  binary_path: /usr/sbin/responder
+  category: post_exploit
+  purpose: LLMNR/NBT-NS/MDNS poisoner for NTLM capture
+  example_command: responder -I eth0 -wF
+  installed: true
+- name: tcpdump
+  binary_path: /usr/bin/tcpdump
+  category: post_exploit
+  purpose: Network packet capture
+  example_command: tcpdump -i eth0 -w capture.pcap
+  installed: true
+- name: tshark
+  binary_path: /usr/bin/tshark
+  category: post_exploit
+  purpose: CLI Wireshark — packet analysis
+  example_command: tshark -r capture.pcap -Y http
+  installed: true
+- name: mitmproxy
+  binary_path: /usr/bin/mitmproxy
+  category: post_exploit
+  purpose: Interactive TLS-capable MITM proxy
+  example_command: mitmproxy -p 8080
+  installed: true
+- name: linpeas
+  binary_path: /usr/bin/linpeas
+  category: privesc
+  purpose: Linux Privilege Escalation Awesome Script (system)
+  example_command: linpeas
+  installed: true
+- name: linenum
+  binary_path: NOT FOUND
+  category: privesc
+  purpose: Linux enumeration script for privesc
+  example_command: linenum
+  installed: false
+- name: pspy
+  binary_path: NOT FOUND
+  category: privesc
+  purpose: Unprivileged process snooping (no root)
+  example_command: pspy64
+  installed: false
+- name: shellnoob
+  binary_path: /usr/bin/shellnoob
+  category: privesc
+  purpose: Shellcode writing helper
+  example_command: shellnoob -i
+  installed: true
+- name: gdb
+  binary_path: /usr/bin/gdb
+  category: privesc
+  purpose: GNU debugger for binary exploitation
+  example_command: gdb ./binary
+  installed: true
+- name: pwn
+  binary_path: /usr/bin/pwn
+  category: privesc
+  purpose: pwntools binary exploitation framework CLI
+  example_command: pwn cyclic 200
+  installed: true
+- name: john
+  binary_path: /usr/sbin/john
+  category: credential_attack
+  purpose: John the Ripper — password hash cracker
+  example_command: john --wordlist=rockyou.txt hashes.txt
+  installed: true
+- name: hashcat
+  binary_path: /usr/bin/hashcat
+  category: credential_attack
+  purpose: GPU-accelerated hash cracker
+  example_command: hashcat -m 1000 hash.txt wordlist.txt
+  installed: true
+- name: veil
+  binary_path: NOT FOUND
+  category: evasion
+  purpose: AV-evading payload generator
+  example_command: veil
+  installed: false
+- name: binwalk
+  binary_path: /usr/bin/binwalk
+  category: forensics
+  purpose: Firmware/binary analysis and extraction
+  example_command: binwalk -e firmware.bin
+  installed: true
+- name: foremost
+  binary_path: /usr/bin/foremost
+  category: forensics
+  purpose: File carving from disk images
+  example_command: foremost -i disk.img -o output/
+  installed: true
+- name: autopsy
+  binary_path: /usr/bin/autopsy
+  category: forensics
+  purpose: Digital forensics GUI platform
+  example_command: autopsy
+  installed: true
+- name: tcpreplay
+  binary_path: /usr/bin/tcpreplay
+  category: forensics
+  purpose: Replay captured network traffic
+  example_command: tcpreplay -i eth0 capture.pcap
+  installed: true
+- name: strings
+  binary_path: /usr/bin/strings
+  category: forensics
+  purpose: Extract printable strings from binaries
+  example_command: strings binary | grep -i pass
+  installed: true
+- name: radare2
+  binary_path: NOT FOUND
+  category: forensics
+  purpose: Reverse engineering framework
+  example_command: r2 binary
+  installed: false
+- name: curl
+  binary_path: /usr/bin/curl
+  category: recon
+  purpose: HTTP client for web requests
+  example_command: curl -sI {url}
+  installed: true
+- name: wget
+  binary_path: /usr/bin/wget
+  category: recon
+  purpose: File downloader
+  example_command: wget -q {url}
+  installed: true
+- name: arpspoof
+  binary_path: /usr/sbin/arpspoof
+  category: enumeration
+  purpose: 'Pentest tool: arpspoof'
+  example_command: arpspoof --help
+  installed: true
+- name: ettercap
+  binary_path: /usr/bin/ettercap
+  category: enumeration
+  purpose: 'Pentest tool: ettercap'
+  example_command: ettercap --help
+  installed: true
+- name: netdiscover
+  binary_path: /usr/sbin/netdiscover
+  category: enumeration
+  purpose: 'Pentest tool: netdiscover'
+  example_command: netdiscover --help
+  installed: true
+- name: traceroute
+  binary_path: /usr/sbin/traceroute
+  category: enumeration
+  purpose: 'Pentest tool: traceroute'
+  example_command: traceroute --help
+  installed: true
