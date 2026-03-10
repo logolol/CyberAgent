@@ -3,7 +3,7 @@
 CyberAgent — Environment Validation Script
 Checks all components and prints a rich status table.
 """
-import os, sys, time, shutil, json
+import os, sys, time, shutil, json, importlib
 from pathlib import Path
 
 # ── Activate venv path awareness ─────────────────────────────────────
@@ -36,7 +36,8 @@ try:
     models = [m.model for m in client.list().models]
     check("Ollama service", f"{len(models)} models loaded", True)
 except Exception as e:
-    check("Ollama service", str(e)[:60], False)
+    _msg: str = str(e)
+    check("Ollama service", _msg[:60], False)
     models = []
 
 # ── 2. Model pings ───────────────────────────────────────────────────
@@ -50,7 +51,8 @@ for env_key, label in [("DEFAULT_MODEL","qwen2.5 default"),
                     options={"num_predict":1})
         check(label, model, True)
     except Exception as e:
-        check(label, f"{model} — {str(e)[:50]}", False)
+        _msg: str = str(e)
+        check(label, f"{model} — {_msg[:50]}", False)
 
 # ── 3. Embedding test (nomic-embed-text, 768 dims) ───────────────────
 try:
@@ -59,17 +61,21 @@ try:
     dims = len(resp.embedding)
     check("nomic-embed-text", f"{dims} dims", dims == 768)
 except Exception as e:
-    check("nomic-embed-text", str(e)[:60], False)
+    _msg: str = str(e)
+    check("nomic-embed-text", _msg[:60], False)
 
 # ── 4. LLM Factory ───────────────────────────────────────────────────
 try:
     from utils.llm_factory import get_llm, get_embeddings
     llm_d = get_llm("default")
     llm_r = get_llm("reasoning")
-    check("LLM Factory (default)", str(llm_d.model)[:50], True)
-    check("LLM Factory (reasoning)", str(llm_r.model)[:50], True)
+    _d: str = str(llm_d.model)
+    _r: str = str(llm_r.model)
+    check("LLM Factory (default)", _d[:50], True)
+    check("LLM Factory (reasoning)", _r[:50], True)
 except Exception as e:
-    check("LLM Factory", str(e)[:60], False)
+    _msg: str = str(e)
+    check("LLM Factory", _msg[:60], False)
 
 # ── 5. ChromaDB collections ──────────────────────────────────────────
 EXPECTED_COLS = [
@@ -90,7 +96,8 @@ try:
     check("ChromaDB total", f"{total_rag_docs:,} docs across {len(EXPECTED_COLS)} collections",
           total_rag_docs > 100000)
 except Exception as e:
-    check("ChromaDB", str(e)[:60], False)
+    _msg: str = str(e)
+    check("ChromaDB", _msg[:60], False)
 
 # ── 6. MissionMemory ─────────────────────────────────────────────────
 try:
@@ -106,7 +113,8 @@ try:
     import shutil as _sh
     _sh.rmtree(mm.mission_dir, ignore_errors=True)
 except Exception as e:
-    check("MissionMemory", str(e)[:60], False)
+    _msg: str = str(e)
+    check("MissionMemory", _msg[:60], False)
 
 # ── 7. DynamicToolManager ─────────────────────────────────────────────
 try:
@@ -148,7 +156,8 @@ try:
           f"{total} tools discovered | configure_for_attack: OK | {len(found)}/12 key tools",
           len(found) >= 8)
 except Exception as e:
-    check("DynamicToolManager", str(e)[:80], False)
+    _msg: str = str(e)
+    check("DynamicToolManager", _msg[:80], False)
 
 # ── 8. MCP filesystem server ─────────────────────────────────────────
 mcp_path = shutil.which("mcp-server-filesystem")
@@ -159,7 +168,7 @@ imports_ok = []
 imports_fail = []
 for pkg in ["crewai","langchain","langchain_ollama","chromadb","ollama","rich","yaml","requests","shodan"]:
     try:
-        __import__(pkg)
+        importlib.import_module(pkg)
         imports_ok.append(pkg)
     except ImportError:
         imports_fail.append(pkg)
