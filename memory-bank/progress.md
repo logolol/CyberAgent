@@ -1,5 +1,25 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 2.5 (Prompt Engineering & Model Quality)
+
+### Prompt Layer (src/prompts/)
+- [x] `agent_prompts.py` — 2,726 lines, 8 agents (added missing orchestrator_agent), all 7 mandatory sections per agent (ROLE / ANTI-HALLUCINATION RULES / INPUT FORMAT / REASONING PROCESS / TOOL USAGE / OUTPUT FORMAT / FEW-SHOT EXAMPLES)
+- [x] `few_shot_examples.py` — 24 realistic examples (3× per agent), real CVEs + real tool output formats (nmap/sqlmap/gobuster/hydra/linpeas/meterpreter)
+- [x] `output_schemas.py` — Pydantic v2 output models for all 8 agents, CVE format validator, CVSS range constraints, `validate_agent_output()` + `get_schema_json()`
+- [x] `__init__.py` — exports all 3 modules cleanly, zero SyntaxWarnings
+
+### Modelfiles (training/)
+- [x] `Modelfile.pentest` — expanded: tool output interpretation guide, 10 few-shot Q&A, CVE-UNKNOWN anti-hallucination rule, JSON output discipline
+- [x] `Modelfile.reasoning` — expanded: risk scoring (E×I×CVSS), human-readable translation, PTES report guide, 10 reasoning examples with `<think>` chain
+- [x] Both re-registered with Ollama: `cyberagent-pentest:14b` + `cyberagent-reasoning:8b`
+- [x] `README.md` — model registration workflow + hardware constraints documented
+
+### Dataset & Validation
+- [x] `pentest_dataset.jsonl` — 444 entries audited, 0 real CVSS errors confirmed
+- [x] `validate_env.py` — 24/24 PASS, 0 WARN, 0 FAIL
+- [x] Model tests: pentest → `{"cve":"CVE-2021-41773","cvss":9.8}` ✓ | reasoning → correct attack priority JSON ✓
+- [x] Git committed + pushed (2 commits: agent_prompts rewrite + structure files)
+
 ## ✅ Completed — Day 1 (S1-S2: Foundations)
 
 ### Environment & LLM
