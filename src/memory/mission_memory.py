@@ -65,6 +65,11 @@ class MissionMemory:
         with open(self.state_file) as f:
             self._state = json.load(f)
 
+    @property
+    def state(self) -> dict:
+        """Public read-only alias for _state (used by orchestrator gate checks)."""
+        return self._state
+
     # ── Phase / status ─────────────────────────────────────────────────
     def update_phase(self, phase: str):
         valid = {"recon","enum","vuln","exploit","privesc","postexploit","report"}
@@ -91,7 +96,22 @@ class MissionMemory:
 
     def add_port(self, ip: str, port: int, service: str = "",
                  version: str = "", banner: str = ""):
+        # Validate port range
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            _log.warning(f"add_port: invalid port value '{port}' — skipping")
+            return
+        if not (1 <= port <= 65535):
+            _log.warning(f"add_port: port {port} out of range [1-65535] — skipping")
+            return
+        # Ensure host exists
         self._ensure_host(ip)
+        # Sanitize: strip HTML tags, cap version length
+        import re as _re
+        version = _re.sub(r"<[^>]+>", "", str(version))[:100]
+        service = str(service).strip() or "unknown"
+
         ports = self._state["hosts"][ip]["ports"]
         existing = [p for p in ports if p["port"] == port]
         if existing:
@@ -103,6 +123,29 @@ class MissionMemory:
 
     def add_vulnerability(self, ip: str, cve: str, cvss: float,
                           description: str, exploitable: bool = False):
+        import re as _re
+        # Validate and normalise CVE
+        cve = str(cve).strip().upper()
+        if not _re.match(r"^CVE-\d{4}-\d{4,7}$", cve):
+            _log.warning(f"add_vulnerability: invalid CVE format '{cve}' → set to CVE-UNKNOWN")
+            cve = "CVE-UNKNOWN"
+        # Validate CVSS
+        try:
+            cvss = float(cvss)
+            if not (0.0 <= cvss <= 10.0):
+                _log.warning(f"add_vulnerability: CVSS {cvss} out of range → set to 0.0")
+                cvss = 0.0
+        except (TypeError, ValueError):
+            _log.warning(f"add_vulnerability: CVSS '{cvss}' not a float → set to 0.0")
+            cvss = 0.0
+        # Validate description
+        description = str(description).strip()
+        if not description:
+            description = "No description provided"
+            _log.warning("add_vulnerability: empty description — using placeholder")
+        # Validate exploitable
+        exploitable = bool(exploitable)
+
         self._ensure_host(ip)
         self._state["hosts"][ip]["vulnerabilities"].append({
             "cve": cve, "cvss": cvss, "description": description,
@@ -111,6 +154,17 @@ class MissionMemory:
         self.save_state()
 
     def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = ""):
+        valid_types = {"bash", "sh", "meterpreter", "webshell", "reverse", "bind", "unknown"}
+        shell_type = str(shell_type).strip().lower()
+        if shell_type not in valid_types:
+            _log.warning(f"add_shell: unknown shell_type '{shell_type}' → 'unknown'")
+            shell_type = "unknown"
+        user = str(user).strip()
+        if not user:
+            user = "unknown"
+            _log.warning("add_shell: empty user — using 'unknown'")
+        _log.info(f"Shell obtained: {user}@{ip} via {shell_type}")
+
         self._ensure_host(ip)
         self._state["hosts"][ip]["shells"].append({
             "type": shell_type, "user": user, "shell_path": shell_path,
@@ -119,6 +173,25 @@ class MissionMemory:
 
     def add_credential(self, ip: str, username: str = "", password: str = "",
                        hash_val: str = "", service: str = ""):
+        username = str(username).strip()
+        password = str(password).strip()
+        hash_val = str(hash_val).strip()
+        service = str(service).strip()
+
+        if not username:
+            _log.warning("add_credential: empty username — skipping")
+            return
+        if not password and not hash_val:
+            _log.warning(f"add_credential: no password or hash for '{username}' — skipping")
+            return
+        if not service:
+            service = "unknown"
+            _log.warning("add_credential: empty service — using 'unknown'")
+
+        # Log masked — never expose raw password to console
+        masked = "*" * min(len(password), 8) if password else f"[hash:{hash_val[:8]}...]"
+        _log.info(f"Credential found: {username}@{ip} ({service}) pw={masked}")
+
         self._ensure_host(ip)
         self._state["hosts"][ip]["credentials"].append({
             "username": username, "password": password,

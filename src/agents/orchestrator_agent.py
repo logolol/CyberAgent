@@ -82,61 +82,94 @@ class OrchestratorAgent(BaseAgent):
         self.phase_results: dict[str, dict] = {}
         self.current_phase: Optional[str] = None
 
-    def _direct_llm(self, prompt: str) -> str:
+    def _direct_llm(
+        self,
+        prompt: str,
+        task_complexity: str = "medium",
+        expect_json: bool = True,
+    ) -> dict:
         """
         Single-shot LLM call for internal orchestrator decisions.
 
-        Uses the BASE deepseek-r1 model via ollama.Client directly (bypassing
-        the custom Modelfile SYSTEM prompt which is ~4500 tokens and would make
-        every short call take 3-4 extra minutes on CPU-only hardware).
-        /no_think suppresses the chain-of-thought block; num_predict caps output.
+        Uses cyberagent-reasoning:8b (lean ~300-token Modelfile) via ollama.Client
+        with adaptive token budgets tuned to task complexity.
+
+        Args:
+            prompt: User prompt (no system prompt injection — Modelfile handles it).
+            task_complexity: "low"|"medium"|"high" — controls num_predict budget.
+            expect_json: If True, extract JSON from response and return dict.
+
+        Returns:
+            dict — always. Never raises. On parse failure returns
+            {"error": "parse_failed", "raw": <first 200 chars>}.
         """
+        from utils.llm_factory import get_reasoning_llm
+        params = get_reasoning_llm(task_complexity)
         try:
             import ollama as _ollama
-            _cfg = self._load_base_model_name()
             client = _ollama.Client(host="http://localhost:11434")
             resp = client.chat(
-                model=_cfg,
+                model=params["model"],
                 messages=[
-                    {"role": "system", "content": "You are a JSON-only pentest decision engine. Return valid JSON only."},
-                    {"role": "user",   "content": "/no_think\n\n" + prompt},
+                    {"role": "user", "content": "/no_think\n\n" + prompt},
                 ],
-                options={"num_predict": 128, "temperature": 0.05},
+                options=params["options"],
             )
             raw = resp["message"]["content"]
         except Exception as e:
             self.log_error(f"Direct LLM call failed: {e}")
-            return ""
-        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            return {"error": "llm_failed", "raw": ""}
+
+        cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        if expect_json:
+            return self._extract_json_robust(cleaned)
+        return {"raw": cleaned}
+
+    def _extract_json_robust(self, text: str) -> dict:
+        """
+        Extract JSON from LLM output using 3 strategies. Never raises.
+        Strategy 1: direct json.loads
+        Strategy 2: regex — first { ... } block
+        Strategy 3: ```json ... ``` code fence
+        Strategy 4: fallback error dict (logged as warning)
+        """
+        # Strategy 1: direct parse (model returned clean JSON)
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Strategy 2: find outermost { ... }
+        json_m = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_m:
+            try:
+                return json.loads(json_m.group())
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Strategy 3: ```json { ... } ``` fence
+        block_m = re.search(r"```(?:json)?\s*(\{.+?\})\s*```", text, re.DOTALL)
+        if block_m:
+            try:
+                return json.loads(block_m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Strategy 4: give up gracefully
+        self.log_warning(f"JSON extraction failed from: {text[:200]}")
+        return {"error": "parse_failed", "raw": text[:200]}
 
     @staticmethod
     def _load_base_model_name() -> str:
-        """Read the reasoning BASE model name from config (no Modelfile overhead)."""
+        """Read the reasoning BASE model name from config."""
         try:
             import yaml
             cfg_path = Path(__file__).parent.parent.parent / "config" / "models.yaml"
             with open(cfg_path) as f:
                 cfg = yaml.safe_load(f)
-            return cfg["models"]["reasoning_base"]["name"]   # deepseek-r1:8b-llama-distill-q4_K_M
+            return cfg["models"]["reasoning_base"]["name"]
         except Exception:
             return "deepseek-r1:8b-llama-distill-q4_K_M"
-
-    def _extract_json(self, text: str) -> dict:
-        """Extract the first JSON object from raw LLM text. Returns {} on failure."""
-        json_m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", text, re.DOTALL)
-        if json_m:
-            try:
-                return json.loads(json_m.group())
-            except json.JSONDecodeError:
-                pass
-        # Try code block
-        block_m = re.search(r"```(?:json)?\s*(\{.+?\})\s*```", text, re.DOTALL)
-        if block_m:
-            try:
-                return json.loads(block_m.group(1))
-            except json.JSONDecodeError:
-                pass
-        return {}
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -166,14 +199,14 @@ class OrchestratorAgent(BaseAgent):
 
         # ── STEP 2: Initial planning ──────────────────────────────────────────
         prompt = (
-            "/no_think\n\n"
             f"Target: {target}, Phase: {phase}.\n"
             'Return JSON: {"target_type":"ip","initial_hypothesis":"string",'
             '"recon_priorities":["ports","services"],'
             '"estimated_complexity":"medium","notes":"string"}'
         )
-        raw = self._direct_llm(prompt)
-        planning_result = self._extract_json(raw) or {"target_type": "ip", "notes": raw[:200]}
+        planning_result = self._direct_llm(prompt, task_complexity="high")
+        if "error" in planning_result:
+            planning_result = {"target_type": "ip", "notes": f"Planning for {target}"}
         self.memory.log_action("Orchestrator", "initial_planning", str(planning_result))
 
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
@@ -251,121 +284,109 @@ class OrchestratorAgent(BaseAgent):
         # Single-phase shorthand
         return [phase] if phase in self.ATTACK_CHAIN else list(self.ATTACK_CHAIN)
 
-    def _check_phase_gate(self, phase: str) -> tuple[bool, str]:
+    def _check_phase_gate(self, phase_name: str) -> tuple[bool, str]:
         """
-        Determine whether conditions are met to run *phase*.
-        1. Static check against PHASE_GATES + phase_results
-        2. Quick LLM confirmation (single call, not full react loop)
+        Evidence-based phase gate — reads MissionMemory state only.
+        NEVER uses LLM: only hard data from confirmed tool output counts.
+        LLM cannot override a failed gate.
+
+        Gate logic:
+          recon       → always runs
+          enumeration → need ≥1 live host in MissionMemory
+          vuln_scan   → need ≥1 open port across all hosts
+          exploitation→ need ≥1 exploitable vuln confirmed by tool
+          privesc     → need ≥1 confirmed shell (any user)
+          postexploit → need ≥1 confirmed shell (any user is enough)
+          reporting   → always runs
         """
-        if phase not in self.PHASE_GATES:
-            return True, "No gate defined for this phase"
-
-        condition_desc, required_field, min_val = self.PHASE_GATES[phase]
-
-        # Reporting always runs
-        if required_field is None:
-            return True, condition_desc
-
-        # ── Static check: look at results from previous phases ────────────────
-        for _pname, result in self.phase_results.items():
-            inner = result.get("result", {})
-            if required_field in inner:
-                actual = inner[required_field]
-                if isinstance(min_val, bool):
-                    if bool(actual) == min_val:
-                        return True, f"Static gate passed: {required_field}={actual}"
-                else:
-                    if isinstance(actual, (int, float)) and actual >= min_val:
-                        return True, f"Static gate passed: {required_field}={actual}"
-
-        # ── Static check: look at MissionMemory state ─────────────────────────
         hosts = self.memory._state.get("hosts", {})
-        if required_field == "hosts_found" and len(hosts) >= min_val:
-            return True, f"State gate passed: {len(hosts)} hosts"
-        if required_field == "services_found":
-            total = sum(len(h.get("ports", [])) for h in hosts.values())
-            if total >= min_val:
-                return True, f"State gate passed: {total} services"
-        if required_field == "exploitable_vulns":
-            count = sum(
-                sum(1 for v in h.get("vulnerabilities", []) if v.get("exploitable"))
-                for h in hosts.values()
-            )
-            if count >= min_val:
-                return True, f"State gate passed: {count} exploitable vulns"
-        if required_field == "shells_obtained":
-            shells = sum(len(h.get("shells", [])) for h in hosts.values())
-            if shells >= min_val:
-                return True, f"State gate passed: {shells} shells"
-        if required_field == "root_obtained":
-            root = any(
-                any(p.get("root") for p in h.get("privesc_paths", []))
-                for h in hosts.values()
-            )
-            if root == min_val:
-                return True, "State gate passed: root obtained"
 
-        # ── LLM dynamic check — only if static failed ─────────────────────────
-        # Skip for stub runs where phase_results already have the required fields
-        if self.phase_results:  # only call LLM if we have real previous results
-            try:
-                prompt = (
-                    "/no_think\n\n"
-                    f"Should we proceed with '{phase}'? Gate: {condition_desc}. "
-                    f"Hosts: {len(hosts)}. "
-                    f'Respond JSON: {{"proceed": true, "reason": "string"}}'
-                )
-                raw = self._direct_llm(prompt)
-                data = self._extract_json(raw)
-                if data:
-                    return bool(data.get("proceed", False)), data.get("reason", "LLM decision")
-            except Exception as e:
-                self.log_warning(f"LLM gate check failed ({e}) — using static result")
+        gates: dict = {
+            "recon": lambda: (
+                True,
+                "Always runs first",
+            ),
+            "reporting": lambda: (
+                True,
+                "Always runs",
+            ),
+            "enumeration": lambda: (
+                len(hosts) > 0,
+                f"Need live hosts. Found: {len(hosts)}",
+            ),
+            "vuln_scan": lambda: (
+                any(len(h.get("ports", [])) > 0 for h in hosts.values()),
+                f"Need open ports. Found: "
+                f"{sum(len(h.get('ports', [])) for h in hosts.values())} total",
+            ),
+            "exploitation": lambda: (
+                any(
+                    any(v.get("exploitable") for v in h.get("vulnerabilities", []))
+                    for h in hosts.values()
+                ),
+                "Need ≥1 exploitable vulnerability confirmed by tool evidence",
+            ),
+            "privesc": lambda: (
+                any(len(h.get("shells", [])) > 0 for h in hosts.values()),
+                "Need ≥1 confirmed shell (any user)",
+            ),
+            "postexploit": lambda: (
+                # Relaxed: any shell (not just root) enables post-exploit
+                any(len(h.get("shells", [])) > 0 for h in hosts.values()),
+                "Need ≥1 confirmed shell for post-exploit",
+            ),
+        }
 
-        return False, f"Gate not met: {condition_desc}"
+        if phase_name not in gates:
+            return True, "No gate defined — running by default"
+
+        passed, reason = gates[phase_name]()
+        return passed, reason
 
     def _build_agent_briefing(self, phase_name: str) -> dict:
         """
         Ask DeepSeek-R1 to compose a targeted briefing for the next specialist.
-        Uses a short prompt to avoid context overflow.
+        Uses medium complexity (1024 token budget).
         """
         hosts_summary = {ip: {"ports": len(h.get("ports", [])), "vulns": len(h.get("vulnerabilities", []))}
                          for ip, h in self.memory._state.get("hosts", {}).items()}
         prev_results = {k: v.get("result", {}) for k, v in list(self.phase_results.items())[-2:]}
 
         prompt = (
-            "/no_think\n\n"
             f"Briefing for pentest agent '{phase_name}' against {self.memory.target}.\n"
             f"Known: {json.dumps(hosts_summary)}\n"
             f"Recent: {json.dumps(prev_results)}\n"
             'Return JSON: {"priority_targets":[],"known_info":{},"attack_vectors":[],'
             '"avoid":[],"rag_queries":["q1"],"special_instructions":"string"}'
         )
-        raw = self._direct_llm(prompt)
-        return self._extract_json(raw) or {"special_instructions": f"Focus on {phase_name} for {self.memory.target}"}
+        result = self._direct_llm(prompt, task_complexity="medium")
+        if "error" in result:
+            return {"special_instructions": f"Focus on {phase_name} for {self.memory.target}"}
+        return result
 
     def _analyze_phase_result(self, phase: str, result: dict) -> dict:
         """
         Ask DeepSeek-R1 to analyse what a specialist agent returned.
-        Uses a short prompt to avoid context overflow.
+        Uses medium complexity (1024 token budget).
         """
         inner = result.get("result", {})
         prompt = (
-            "/no_think\n\n"
             f"Phase '{phase}' done. Success: {result.get('success')}. "
             f"Results: {json.dumps(inner)[:300]}\n"
             'Return JSON: {"success":true,"findings_count":0,"key_insight":"string",'
             '"critical_finding":false,"recommended_next":"string",'
             '"strategy_update":null,"attack_chain_adjustment":null}'
         )
-        raw = self._direct_llm(prompt)
-        return self._extract_json(raw) or {
-            "success": bool(result.get("success")),
-            "findings_count": len(inner) if isinstance(inner, dict) else 0,
-            "key_insight": f"Phase {phase} {'succeeded' if result.get('success') else 'failed'}",
-            "critical_finding": False,
-            "recommended_next": "continue",
-        }
+        data = self._direct_llm(prompt, task_complexity="medium")
+        if "error" in data:
+            return {
+                "success": bool(result.get("success")),
+                "findings_count": len(inner) if isinstance(inner, dict) else 0,
+                "key_insight": f"Phase {phase} {'succeeded' if result.get('success') else 'failed'}",
+                "critical_finding": False,
+                "recommended_next": "continue",
+            }
+        return data
 
     def _update_attack_strategy(self, analysis: dict):
         """Log a strategy pivot triggered by a critical finding."""

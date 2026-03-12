@@ -263,10 +263,13 @@ class BaseAgent:
             # ── FINAL_ANSWER ─────────────────────────────────────────────
             if parsed["final_answer"] is not None:
                 self.log_success(f"Done after {i+1} iteration(s)")
+                # Run hallucination guard before returning
+                phase = getattr(self, "current_phase", "unknown")
+                guarded = self.hallucination_guard(parsed["final_answer"], phase)
                 return {
                     "agent": self.agent_name,
                     "success": True,
-                    "result": parsed["final_answer"],
+                    "result": guarded,
                     "iterations": i + 1,
                     "actions_taken": actions_taken,
                     "error": None,
@@ -341,6 +344,104 @@ class BaseAgent:
             "actions_taken": actions_taken,
             "error": error,
         }
+
+    # ── Hallucination guard ───────────────────────────────────────────────────
+
+    def hallucination_guard(self, agent_output: dict, phase: str) -> dict:
+        """
+        Validate agent output before it reaches MissionMemory.
+        Catches 5 classes of hallucination. Never raises — always returns dict.
+
+        Checks:
+          1. CVE format — must match CVE-YYYY-NNNNN (year 1999-2026, id 4-7 digits)
+          2. CVSS score — must be float 0.0–10.0
+          3. Confirmed without evidence — demote to "potential"
+          4. Vague version string — must look like a real version, not a description
+          5. IP address format — must be valid IPv4 dotted-quad
+
+        Adds _hallucination_flags and _guard_passed to output.
+        """
+        import copy
+        import ipaddress
+
+        flags: list[str] = []
+        cleaned = copy.deepcopy(agent_output)
+
+        def _check_dict(obj: Any):
+            if not isinstance(obj, dict):
+                return
+            for k, v in list(obj.items()):
+                # CHECK 1 — CVE format
+                if isinstance(v, str):
+                    for cve in re.findall(r"CVE-[\w-]+", v, re.IGNORECASE):
+                        if not re.match(r"^CVE-\d{4}-\d{4,7}$", cve.upper()):
+                            obj[k] = v.replace(cve, "CVE-INVALID-REMOVED")
+                            flags.append(f"invalid_cve_format:{cve}")
+                elif k in ("cve",) and v is not None and isinstance(v, str):
+                    if v != "CVE-UNKNOWN" and not re.match(r"^CVE-\d{4}-\d{4,7}$", v):
+                        obj[k] = "CVE-INVALID-REMOVED"
+                        flags.append(f"invalid_cve_format:{v}")
+
+                # CHECK 2 — CVSS range
+                if k in ("cvss", "cvss_score", "score") and v is not None:
+                    try:
+                        score = float(v)
+                        if not (0.0 <= score <= 10.0):
+                            obj[k] = None
+                            flags.append(f"invalid_cvss:{v}")
+                    except (TypeError, ValueError):
+                        obj[k] = None
+                        flags.append(f"invalid_cvss:{v}")
+
+                # CHECK 4 — version string sanity (≤4 words → likely real version)
+                if k in ("version", "service_version", "ver") and isinstance(v, str) and v:
+                    if len(v.split()) > 4:
+                        obj[k] = "version_unknown"
+                        flags.append(f"vague_version_string:{v[:50]}")
+
+                # CHECK 5 — IP address
+                if k in ("ip", "host") and isinstance(v, str) and v:
+                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", v):
+                        try:
+                            ipaddress.ip_address(v)
+                        except ValueError:
+                            del obj[k]
+                            flags.append(f"invalid_ip:{v}")
+
+                # Recurse
+                if isinstance(v, dict):
+                    _check_dict(v)
+                elif isinstance(v, list):
+                    _check_list(v)
+
+        def _check_list(lst: list):
+            for item in lst:
+                if isinstance(item, dict):
+                    # CHECK 3 — confirmed without evidence
+                    if item.get("confirmed") is True:
+                        evidence = item.get("evidence", "")
+                        if not (isinstance(evidence, str) and evidence.strip()):
+                            item["confirmed"] = False
+                            item["potential"] = True
+                            flags.append("unconfirmed_finding_demoted")
+                    _check_dict(item)
+                elif isinstance(item, list):
+                    _check_list(item)
+
+        _check_dict(cleaned)
+
+        # Also walk top-level list values
+        for k, v in cleaned.items():
+            if isinstance(v, list):
+                _check_list(v)
+
+        cleaned["_hallucination_flags"] = flags
+        cleaned["_guard_passed"] = len(flags) == 0
+
+        if flags:
+            self.log_warning(f"Hallucination guard: {len(flags)} issue(s) — {flags}")
+
+        return cleaned
 
     # ── Logging helpers ───────────────────────────────────────────────────────
 
