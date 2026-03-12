@@ -127,6 +127,26 @@ training/
 - T5 — validate_env.py: **24/24 PASS, 0 WARN, 0 FAIL** ✅
 - Commit: `1fa7cd8` pushed to main
 
+### JSON Extraction Fix (Day 3 follow-up) ✅
+
+#### Root cause
+`stop=["</think>"]` in `get_reasoning_llm()` consumed the stop token before JSON was generated. `/no_think` prefix in `_direct_llm()` caused empty `""` responses on the distilled LLaMA-based model.
+
+#### Fix (orchestrator_agent.py + llm_factory.py)
+- Removed `stop=["</think>"]` from options — let model complete naturally
+- Removed `/no_think` prefix — lean Modelfile OUTPUT DISCIPLINE already enforces JSON-only
+- Rewrote `_extract_json_robust()` with 7-step extraction:
+  1. Strip `<think>…</think>` blocks (handles nested + unclosed)
+  2. Strip ` ```json ``` ` fences
+  3. `json.loads()` direct parse
+  4. Brace-depth walk for LAST `{…}` block
+  5. Brace-depth walk for FIRST `{…}` block
+  6. Try original pre-strip text
+  7. Fix trailing commas / single quotes / unquoted keys
+- Added JSON discipline instruction to every `expect_json` prompt
+- **Result:** Smoke test runs with zero "JSON extraction failed" messages
+- Commit: `9765b45`
+
 ## Current Focus (Next: S5-S6)
 Build the **Recon Agent** (`src/agents/recon_agent.py`) with:
 Build the **Recon Agent** (`src/agents/recon_agent.py`) with:

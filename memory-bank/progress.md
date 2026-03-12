@@ -12,6 +12,13 @@
 - [x] `Modelfile.pentest` — shrunk to ~292 tokens; re-registered as `cyberagent-pentest:14b`
 - [x] All 5 validation tests passed; commit `1fa7cd8` pushed to main
 
+### JSON Extraction Fix (Day 3 follow-up)
+- [x] Root cause found: `stop=["</think>"]` consumed stop token before JSON generated; `/no_think` prefix caused empty responses on distilled LLaMA model
+- [x] Rewrote `_extract_json_robust()` — 7-step bulletproof extractor (think-strip → fence-strip → direct parse → brace-depth last/first → pre-strip fallback → JSON repair)
+- [x] Removed `stop=["</think>"]` from `get_reasoning_llm()` and `/no_think` from `_direct_llm()`
+- [x] Added JSON discipline instruction appended to every `expect_json` prompt
+- [x] Smoke test: **zero "JSON extraction failed" messages**; commit `9765b45` pushed to main
+
 ## ✅ Completed — Day 2.5 (Prompt Engineering & Model Quality)
 
 ### Prompt Layer (src/prompts/)

@@ -278,6 +278,139 @@ CyberAgent/
 
 ---
 
+## 🗓️ Day 3 — Orchestrator Hardening + Agent Framework (Complete)
+
+### What was built on Day 3
+
+Day 3 delivered the agent framework (`BaseAgent`, `OrchestratorAgent`, stub specialists) plus 5 production-readiness hardening fixes targeting the real performance and correctness constraints of running DeepSeek-R1 on CPU-only hardware.
+
+---
+
+### 1. BaseAgent + OrchestratorAgent
+
+**Files:** `src/agents/base_agent.py`, `src/agents/orchestrator_agent.py`, `src/agents/*.py`
+
+- `BaseAgent` — parent ReAct loop (Thought → Action → Observation) for all specialist agents. Handles tool dispatch, iteration limits, LLM calls via `get_llm(role)`, and final answer extraction.
+- `OrchestratorAgent` — mission commander using `cyberagent-reasoning:8b`. Runs the full attack chain (`recon → enum → vuln_scan → exploitation → privesc → postexploit → reporting`), calls `_build_agent_briefing()` + `_analyze_phase_result()` for each phase, enforces evidence-based phase gates, and delegates to specialist stubs.
+- 7 specialist stub agents (`ReconAgent`, `EnumerationAgent`, `VulnScanAgent`, `ExploitationAgent`, `PrivescAgent`, `PostExploitAgent`, `ReportingAgent`) — scaffolded and wired to `main.py`.
+- `main.py` — CLI entry point: `python3 main.py --target <IP> --phase full`
+
+---
+
+### 2. Lean Modelfiles (18× faster prefill)
+
+**Files:** `training/Modelfile.reasoning`, `training/Modelfile.pentest`
+
+| | Before | After |
+|---|---|---|
+| System prompt tokens | ~4,500 | ~265 (reasoning) / ~292 (pentest) |
+| Prefill time per call | ~225s | ~15s |
+
+Shrunk to identity + absolute rules + output discipline only. All methodology, Q&A, and CVE examples live in ChromaDB RAG — not in the Modelfile. Both re-registered:
+```bash
+ollama create cyberagent-reasoning:8b -f training/Modelfile.reasoning
+ollama create cyberagent-pentest:14b  -f training/Modelfile.pentest
+```
+
+---
+
+### 3. Adaptive Token Budgeting
+
+**File:** `src/utils/llm_factory.py` — `get_reasoning_llm(task_complexity)`
+
+| Complexity | Budget | Used for |
+|---|---|---|
+| `"low"` | 512 tokens | Phase gate checks, yes/no decisions |
+| `"medium"` | 1024 tokens | Phase briefings, result analysis |
+| `"high"` | 2048 tokens | Initial attack chain planning |
+
+---
+
+### 4. Hallucination Guard
+
+**File:** `src/agents/base_agent.py` — `hallucination_guard(output, phase)`
+
+Validates every agent output before it enters `MissionMemory`. 5 checks:
+
+| Check | What it catches | Action |
+|---|---|---|
+| CVE format | `CVE-99-123` (bad year/id) | Replace with `CVE-INVALID-REMOVED` |
+| CVSS range | Score outside 0.0–10.0 | Set to `null` |
+| Confirmed without evidence | `confirmed: true` + no `evidence` field | Demote to `potential: true` |
+| Vague version string | `"some web thing"` (>4 words) | Replace with `version_unknown` |
+| Invalid IP | Non-IPv4 in `ip`/`host` fields | Remove from output |
+
+Returns `{"_hallucination_flags": [...], "_guard_passed": bool}` — never raises.
+
+---
+
+### 5. Evidence-Based Phase Gates
+
+**File:** `src/agents/orchestrator_agent.py` — `_check_phase_gate()`
+
+**Architecture rule: gates NEVER call the LLM.** Only hard data from `MissionMemory._state["hosts"]` counts. LLM cannot override a failed gate.
+
+| Phase | Gate condition |
+|---|---|
+| `recon` | Always runs |
+| `enumeration` | `len(hosts) > 0` |
+| `vuln_scan` | ≥1 open port across all hosts |
+| `exploitation` | ≥1 vuln with `exploitable: True` |
+| `privesc` | ≥1 confirmed shell (any user) |
+| `postexploit` | ≥1 confirmed shell (any user) |
+| `reporting` | Always runs |
+
+---
+
+### 6. MissionMemory Input Validation
+
+**File:** `src/memory/mission_memory.py`
+
+| Method | Validation added |
+|---|---|
+| `add_port()` | Port range 1–65535, HTML-strip version string, auto-create host |
+| `add_vulnerability()` | CVE format → `CVE-UNKNOWN` if invalid, CVSS clamp 0.0–10.0 |
+| `add_shell()` | Type must be in `{bash,sh,meterpreter,webshell,reverse,bind,unknown}` |
+| `add_credential()` | Non-empty username, password or hash required, password masked as `****` |
+
+---
+
+### 7. Bulletproof JSON Extraction for DeepSeek-R1
+
+**File:** `src/agents/orchestrator_agent.py` — `_extract_json_robust()`
+
+**Root cause of "JSON extraction failed":** `stop=["</think>"]` consumed the stop token before JSON could be generated — model output contained only the think chain. `/no_think` prefix caused empty responses on the distilled LLaMA model.
+
+**Fix — removed both, replaced with 7-step extractor:**
+
+```
+1. Strip all <think>…</think> blocks (handles nested + unclosed/truncated)
+2. Strip ```json fences
+3. Direct json.loads() on cleaned text
+4. Brace-depth walk — LAST complete {} block (handles trailing prose)
+5. Brace-depth walk — FIRST complete {} block
+6. Try original text (pre-strip fallback)
+7. Fix trailing commas, single quotes, unquoted keys
+```
+
+Handles all real DeepSeek-R1 patterns: think+JSON, think+fence, raw JSON, prose+JSON, unclosed think. Never raises — returns `{"error": "parse_failed"}` as last resort.
+
+**Result:** Smoke test (`python3 main.py --target 127.0.0.1 --phase full`) runs with **zero JSON extraction failures**.
+
+---
+
+### Day 3 Validation Results
+
+```
+✅ Modelfile token count  : reasoning=265, pentest=292 (both <600)
+✅ Hallucination guard    : 7 flags caught from adversarial test input
+✅ Phase gates            : empty mission correctly blocks all non-recon phases
+✅ Smoke test             : main.py --target 127.0.0.1 exits 0, zero JSON failures
+✅ validate_env.py        : 24/24 PASS, 0 WARN, 0 FAIL
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash
@@ -304,8 +437,8 @@ python3 src/memory/mission_memory.py
 | Sprint | Focus | Status |
 |---|---|---|
 | **S1-S2** | Environment, RAG (146K docs), core modules (incl. DynamicToolManager) | ✅ **DONE** |
-| S3-S4 | Orchestrator Agent + ReAct engine + JSON state | 🔜 Next |
-| S5-S6 | Recon Agent (parallel: DNS, OSINT, active) | ⏳ |
+| **S3-S4** | Orchestrator Agent + BaseAgent + hardening (hallucination guard, phase gates, JSON fix) | ✅ **DONE** |
+| S5-S6 | Recon Agent (parallel: DNS, OSINT, active) | 🔜 Next |
 | S7-S8 | Enumeration + VulnScan Agents | ⏳ |
 | S9-S11 | Exploitation Agent (parallel vectors) | ⏳ |
 | S12-S13 | PrivEsc + Post-Exploit Agents | ⏳ |
