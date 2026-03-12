@@ -1,7 +1,7 @@
 # Active Context — Multi-Agent PentestAI
 
 ## Current Phase
-**Day 2.5 COMPLETE — Prompt Engineering & Model Quality** → Next: S3-S4 Orchestrator Agent implementation
+**Day 3 COMPLETE — Orchestrator Hardening** → Next: S5-S6 Recon Agent implementation
 
 ## What Was Just Completed (Day 2.5)
 
@@ -82,13 +82,59 @@ training/
   README.md            ← workflow docs
 ```
 
-## Current Focus (Next: S3-S4)
-Build the **Orchestrator Agent** (`src/agents/orchestrator.py`) with:
-1. CrewAI Manager Agent or standalone ReAct engine
-2. `get_agent_prompt("orchestrator_agent")` already ready — just wire it up
-3. Phase gate logic: recon → enum → vuln → exploit → privesc → postexploit → report
-4. Agent delegation: dispatch specialist agents with structured task JSON
-5. `validate_agent_output()` to verify each agent's JSON before MissionMemory write
+## What Was Just Completed (Day 3)
+
+### Orchestrator Hardening — 5 Production-Readiness Fixes ✅
+
+#### FIX 1 — Adaptive Token Budgeting (llm_factory.py)
+- Added `get_reasoning_llm(task_complexity)` returning ollama.Client params
+- Budgets: `low=512` (gate checks), `medium=1024` (briefings), `high=2048` (planning)
+- `stop: ["</think>"]` terminates DeepSeek-R1 think-chains cleanly
+- `_direct_llm()` now accepts `task_complexity` + `expect_json`, returns dict always
+- `_extract_json_robust()` with 3 strategies + graceful fallback (never crashes)
+
+#### FIX 2 — Lean Modelfiles (training/)
+- `Modelfile.reasoning`: shrunk from ~4500 tokens → ~265 tokens (identity + rules only)
+- `Modelfile.pentest`: shrunk from ~4500 tokens → ~292 tokens (identity + rules only)
+- Prefill time: ~225s → ~15s per call (18× faster)
+- Both re-registered: `cyberagent-reasoning:8b` + `cyberagent-pentest:14b` ✅
+- `_direct_llm()` now uses `cyberagent-reasoning:8b` again (was bypassed during Day 3 smoke test debugging)
+
+#### FIX 3 — Hallucination Guard (base_agent.py)
+- `hallucination_guard(output, phase)` added to BaseAgent — never crashes, always returns dict
+- 5 checks: CVE format (regex), CVSS range (0-10), confirmed-without-evidence demotion, vague version strings, invalid IP format
+- Wired into `react()` before returning FINAL_ANSWER
+- Test: 7 flags caught from bad input ✅
+
+#### FIX 4 — Evidence-Based Phase Gates (orchestrator_agent.py)
+- `_check_phase_gate()` completely rewritten: reads `MissionMemory._state["hosts"]` only
+- Zero LLM calls — LLM cannot override hard data evidence (architecture rule)
+- `postexploit` gate relaxed: any shell sufficient (not just root)
+- Test: all gates correct with empty mission ✅
+
+#### FIX 5 — MissionMemory Input Validation (mission_memory.py)
+- `add_port`: range 1-65535, HTML-strip version, auto-create host
+- `add_vulnerability`: CVE format→CVE-UNKNOWN, CVSS clamp 0-10, non-empty description
+- `add_shell`: valid type enum (bash/sh/meterpreter/webshell/reverse/bind/unknown)
+- `add_credential`: non-empty username, password or hash required, masks password in logs
+- `state` property added (public alias for `_state` — used by orchestrator gates)
+
+### Test Results ✅
+- T1 — Modelfile token count: reasoning=265, pentest=292 (both <600) ✅
+- T2 — Hallucination guard: 7 flags caught from adversarial input ✅
+- T3 — Phase gates: empty mission correctly blocks all non-recon phases ✅
+- T4 — Smoke test: `main.py --target 127.0.0.1 --phase full` exits 0 ✅
+- T5 — validate_env.py: **24/24 PASS, 0 WARN, 0 FAIL** ✅
+- Commit: `1fa7cd8` pushed to main
+
+## Current Focus (Next: S5-S6)
+Build the **Recon Agent** (`src/agents/recon_agent.py`) with:
+Build the **Recon Agent** (`src/agents/recon_agent.py`) with:
+1. Parallel recon threads: subfinder, amass, dnsrecon, dnsenum, theHarvester
+2. Active: nmap host discovery, whatweb, whois
+3. Store all findings in MissionMemory via validated `add_port/add_host` calls
+4. `hallucination_guard()` wrapping all findings before storage
+5. Phase gate: `enumeration` gate will only open once recon stores ≥1 live host
 
 ## Key Architecture Decisions (Confirmed)
 - All agents get context via: `get_agent_prompt(name) + get_few_shot_block(name) + get_schema_json(name)`

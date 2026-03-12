@@ -1,5 +1,17 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 3 (Orchestrator Hardening)
+
+### Core Hardening Fixes
+- [x] `llm_factory.py` — `get_reasoning_llm(task_complexity)` with budgets low=512/medium=1024/high=2048
+- [x] `orchestrator_agent.py` — `_direct_llm()` returns dict, `_extract_json_robust()` (3 strategies), all call sites updated with correct complexity levels
+- [x] `orchestrator_agent.py` — `_check_phase_gate()` pure evidence-based lambdas (zero LLM, reads MissionMemory._state directly)
+- [x] `base_agent.py` — `hallucination_guard()` (5 checks), wired into `react()` before FINAL_ANSWER
+- [x] `mission_memory.py` — input validation on add_port/add_vulnerability/add_shell/add_credential + `state` property alias
+- [x] `Modelfile.reasoning` — shrunk to ~265 tokens; re-registered as `cyberagent-reasoning:8b`
+- [x] `Modelfile.pentest` — shrunk to ~292 tokens; re-registered as `cyberagent-pentest:14b`
+- [x] All 5 validation tests passed; commit `1fa7cd8` pushed to main
+
 ## ✅ Completed — Day 2.5 (Prompt Engineering & Model Quality)
 
 ### Prompt Layer (src/prompts/)
