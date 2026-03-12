@@ -105,13 +105,21 @@ class OrchestratorAgent(BaseAgent):
         """
         from utils.llm_factory import get_reasoning_llm
         params = get_reasoning_llm(task_complexity)
+
+        json_instruction = (
+            "\n\nOutput ONLY valid JSON after your </think> block. "
+            "No prose, no explanation, no markdown fences. "
+            "Your response must be parseable by json.loads()."
+            if expect_json else ""
+        )
+
         try:
             import ollama as _ollama
             client = _ollama.Client(host="http://localhost:11434")
             resp = client.chat(
                 model=params["model"],
                 messages=[
-                    {"role": "user", "content": "/no_think\n\n" + prompt},
+                    {"role": "user", "content": prompt + json_instruction},
                 ],
                 options=params["options"],
             )
@@ -120,43 +128,102 @@ class OrchestratorAgent(BaseAgent):
             self.log_error(f"Direct LLM call failed: {e}")
             return {"error": "llm_failed", "raw": ""}
 
-        cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         if expect_json:
-            return self._extract_json_robust(cleaned)
-        return {"raw": cleaned}
+            result = self._extract_json_robust(raw)
+            return result
+        # Non-JSON: strip think blocks and return prose
+        cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+        cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
+        return {"raw": cleaned.strip()}
 
     def _extract_json_robust(self, text: str) -> dict:
         """
-        Extract JSON from LLM output using 3 strategies. Never raises.
-        Strategy 1: direct json.loads
-        Strategy 2: regex — first { ... } block
-        Strategy 3: ```json ... ``` code fence
-        Strategy 4: fallback error dict (logged as warning)
+        Bulletproof JSON extraction from DeepSeek-R1 output.
+
+        Handles ALL known DeepSeek-R1 response patterns:
+          Pattern 1: <think>...long chain...</think>\\n{"key": "val"}
+          Pattern 2: <think>...</think>\\n```json\\n{...}\\n```
+          Pattern 3: No think tags — raw JSON: {"key": "val"}
+          Pattern 4: Prose + JSON: "Here is the result: {...}"
+          Pattern 5: JSON with trailing text: {"key": "val"}\\nSome explanation
+          Pattern 6: Nested/unclosed think: <think><think>... (model cut off mid-think)
+
+        Never raises. Returns dict with "error" key on total failure.
         """
-        # Strategy 1: direct parse (model returned clean JSON)
+        if not text or not text.strip():
+            self.log_warning("JSON extraction failed: empty response")
+            return {"error": "parse_failed", "raw": ""}
+
+        # STEP 1 — strip ALL <think>...</think> blocks (handles nested, greedy)
+        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        # Also strip unclosed think tags (model got cut off mid-think by token budget)
+        cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
+        cleaned = cleaned.strip()
+
+        # STEP 2 — strip ```json ... ``` fences if present
+        fence_m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", cleaned, re.DOTALL)
+        if fence_m:
+            cleaned = fence_m.group(1)
+
+        # STEP 3 — try direct parse on stripped text
         try:
-            return json.loads(text)
+            return json.loads(cleaned)
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # Strategy 2: find outermost { ... }
-        json_m = re.search(r"\{.*\}", text, re.DOTALL)
-        if json_m:
+        # STEP 4 — find the LAST complete { } block (brace-depth tracking)
+        # Model sometimes adds explanation AFTER the JSON
+        brace_start = cleaned.rfind("{")
+        if brace_start != -1:
+            depth = 0
+            for i, ch in enumerate(cleaned[brace_start:], brace_start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = cleaned[brace_start : i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except (json.JSONDecodeError, ValueError):
+                            break
+
+        # STEP 5 — find the FIRST complete { } block
+        brace_start = cleaned.find("{")
+        if brace_start != -1:
+            depth = 0
+            for i, ch in enumerate(cleaned[brace_start:], brace_start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = cleaned[brace_start : i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except (json.JSONDecodeError, ValueError):
+                            break
+
+        # STEP 6 — try on original text (before think-stripping, in case strip broke it)
+        for attempt in [text, text.strip()]:
             try:
-                return json.loads(json_m.group())
-            except (json.JSONDecodeError, ValueError):
+                return json.loads(attempt)
+            except Exception:
                 pass
 
-        # Strategy 3: ```json { ... } ``` fence
-        block_m = re.search(r"```(?:json)?\s*(\{.+?\})\s*```", text, re.DOTALL)
-        if block_m:
-            try:
-                return json.loads(block_m.group(1))
-            except (json.JSONDecodeError, ValueError):
-                pass
+        # STEP 7 — fix common JSON issues: trailing commas, single quotes, unquoted keys
+        try:
+            fixed = re.sub(r",\s*}", "}", cleaned)          # trailing comma in object
+            fixed = re.sub(r",\s*]", "]", fixed)            # trailing comma in array
+            fixed = fixed.replace("'", '"')                  # single → double quotes
+            fixed = re.sub(r'(\b\w+\b)\s*:', r'"\1":', fixed)  # unquoted keys
+            fixed = re.sub(r'""(\w+)"":', r'"\1":', fixed)  # fix double-double-quoted keys
+            return json.loads(fixed)
+        except Exception:
+            pass
 
-        # Strategy 4: give up gracefully
-        self.log_warning(f"JSON extraction failed from: {text[:200]}")
+        # All 7 steps failed
+        self.log_warning(f"JSON extraction failed from: {text[:200]!r}")
         return {"error": "parse_failed", "raw": text[:200]}
 
     @staticmethod

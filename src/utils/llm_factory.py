@@ -132,7 +132,10 @@ def get_reasoning_llm(task_complexity: str = "medium") -> dict:
             "num_predict": budgets.get(task_complexity, 1024),
             "temperature": 0.1,
             "num_ctx": 8192,
-            "stop": ["</think>"],
+            # NOTE: do NOT add stop=["</think>"] here.
+            # The stop token is consumed and never appears in the response,
+            # so the think-stripping regex finds nothing and JSON is lost.
+            # Let the model complete naturally; _extract_json_robust strips think blocks.
         },
     }
 
