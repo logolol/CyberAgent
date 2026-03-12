@@ -1,15 +1,55 @@
 models:
+  # ── Pentest-tuned models (use these for production agents) ──
   default:
-    name: qwen2.5:14b-instruct-q4_K_M
+    name: cyberagent-pentest:14b
+    base_model: qwen2.5:14b-instruct-q4_K_M
     use_for: [recon, enumeration, vuln_scan, exploitation, post_exploit, reporting]
     temperature: 0.1
     num_ctx: 8192
+    description: "Qwen2.5:14b with expert pentest system prompt — zero hallucination, all phases"
   reasoning:
-    name: deepseek-r1:8b-llama-distill-q4_K_M
+    name: cyberagent-reasoning:8b
+    base_model: deepseek-r1:8b-llama-distill-q4_K_M
     use_for: [orchestrator, privesc, exploit_chaining, report_generation]
-    temperature: 0.1
+    temperature: 0.05
     num_ctx: 8192
+    num_predict: 256
+    description: "DeepSeek-R1:8b with orchestrator reasoning prompt — mission planning, phase transitions"
   embedding:
     name: nomic-embed-text
     use_for: [chromadb_rag]
+
+  # ── Base models (fallback if tuned models fail) ──
+  default_base:
+    name: qwen2.5:14b-instruct-q4_K_M
+    use_for: [fallback]
+    temperature: 0.1
+    num_ctx: 8192
+  reasoning_base:
+    name: deepseek-r1:8b-llama-distill-q4_K_M
+    use_for: [fallback]
+    temperature: 0.05
+    num_ctx: 8192
+
 ollama_base_url: http://localhost:11434
+
+# ChromaDB collections for RAG (15 total, 147,029 docs)
+rag_collections:
+  primary:
+    - cve_database        # 71,653 NVD CVEs
+    - exploitdb           # 46,437 Exploit-DB records
+    - nuclei_templates    # 12,735 scanner templates
+    - hacktricks          # 8,290 methodology chunks
+    - seclists_meta       # 5,214 wordlist entries
+  secondary:
+    - payloads            # 1,332 payload sections
+    - mitre_attack        # 691 ATT&CK techniques
+    - gtfobins            # 458 binary abuse entries
+    - owasp               # 122 WSTG test cases
+    - privesc_techniques  # 61 Linux PrivEsc techniques
+  extended:
+    - owasp_top10         # 10 OWASP Top 10 2021
+    - cwe_top25           # 10 CWE Top 25 2023
+    - pentest_techniques  # 7 master technique references
+    - ptes_standard       # 7 PTES methodology sections
+    - anti_hallucination  # 2 anti-hallucination protocol docs

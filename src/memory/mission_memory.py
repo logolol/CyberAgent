@@ -197,6 +197,63 @@ class MissionMemory:
     def export_json(self) -> str:
         return json.dumps(self._state, indent=2, default=str)
 
+    # ── Resume support ─────────────────────────────────────────────────
+    @classmethod
+    def load_existing(cls, mission_id: str) -> "MissionMemory":
+        """Load a previously saved mission by ID. Used for --resume."""
+        state_file = MISSIONS_ROOT / mission_id / "state.json"
+        if not state_file.exists():
+            raise FileNotFoundError(
+                f"Mission '{mission_id}' not found at {state_file}"
+            )
+        with open(state_file) as f:
+            saved = json.load(f)
+
+        obj = cls.__new__(cls)
+        obj.mission_id = mission_id
+        obj.target = saved["target"]
+        obj.mission_dir = MISSIONS_ROOT / mission_id
+        obj.state_file = state_file
+        obj._state = saved
+        obj._chroma = None
+        obj._col = None
+        obj._col_name = f"mission_{mission_id}"
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from chroma_manager import ChromaManager
+            obj._chroma = ChromaManager()
+            obj._col = obj._chroma.get_collection(obj._col_name)
+        except Exception as e:
+            _log.warning(f"ChromaDB unavailable in load_existing: {e}")
+        _log.info(f"Resumed mission {mission_id} (target={obj.target})")
+        return obj
+
+    # ── Generic finding dispatch (used by BaseAgent.store_finding) ─────
+    def add_finding_from_dict(self, data: dict):
+        """Route a finding dict to the correct add_* method."""
+        ftype = data.get("finding_type", "note")
+        ip = data.get("ip", "")
+        if ftype == "host":
+            self.add_host(ip, data.get("hostname", ""))
+        elif ftype == "port":
+            self.add_port(ip, int(data.get("port", 0)), data.get("service", ""),
+                          data.get("version", ""), data.get("banner", ""))
+        elif ftype == "vuln":
+            self.add_vulnerability(ip, data.get("cve", "CVE-UNKNOWN"),
+                                   float(data.get("cvss", 0.0)),
+                                   data.get("description", ""),
+                                   bool(data.get("exploitable", False)))
+        elif ftype == "shell":
+            self.add_shell(ip, data.get("type", "unknown"), data.get("user", "unknown"))
+        elif ftype == "cred":
+            self.add_credential(ip, data.get("username", ""), data.get("password", ""),
+                                data.get("hash", ""), data.get("service", ""))
+        elif ftype == "loot":
+            self.add_loot(ip, data.get("type", "unknown"), data.get("content", ""),
+                          data.get("path", ""))
+        else:
+            self.add_note(str(data))
+
 
 if __name__ == "__main__":
     from rich.console import Console
