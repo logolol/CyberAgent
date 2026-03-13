@@ -1,7 +1,193 @@
 # Active Context — Multi-Agent PentestAI
 
 ## Current Phase
-**Day 3 COMPLETE — Orchestrator Hardening** → Next: S5-S6 Recon Agent implementation
+**Day 4 COMPLETE — Enhanced Anti-Hallucination & Command Validation** → Next: S5-S6 Recon Agent implementation
+
+## What Was Just Completed (Day 4)
+
+### Enhanced Anti-Hallucination System ✅
+
+#### Expanded Hallucination Guard (src/agents/base_agent.py)
+**Upgraded from 5 checks to 8 checks with multi-source validation:**
+
+1. **CVE format validation** — CVE-YYYY-NNNNN regex check (year 1999-2026, id 4-7 digits)
+2. **CVSS score range** — Float 0.0–10.0 enforcement
+3. **Evidence-based confirmation** — Demote `confirmed: true` without evidence to `potential: true`
+4. **Version string sanity** — Reject vague descriptions (>4 words → "version_unknown")
+5. **IP address format** — Valid IPv4 dotted-quad validation
+6. **CVE existence verification** — Cross-reference with RAG CVE database (71,653 NVD entries)
+7. **Exploit path validation** — Verify EDB-ID or Metasploit module paths exist
+8. **Command syntax validation** — Check for unmatched quotes, incomplete pipes, suspicious patterns
+
+**New features:**
+- `_validation_sources` field tracks which RAG collections verified each finding
+- CVE marked as `CVE-UNVERIFIED` if not found in database, sets `requires_verification: true`
+- Exploit paths validated against ExploitDB (46,437 entries) and Metasploit module format
+- Command syntax checker prevents:
+  - Unmatched quotes (`'` or `"`)
+  - Incomplete pipes/redirects (`|`, `>>`, `&&` at end)
+  - Suspicious patterns (`rm -rf`, `dd if=`, `mkfs`, etc.)
+
+**Example output:**
+```json
+{
+  "cve": "CVE-2021-41773",
+  "cvss": 9.8,
+  "exploit_path": "EDB-ID:50383",
+  "_hallucination_flags": [],
+  "_guard_passed": true,
+  "_validation_sources": [
+    "cve_database:CVE-2021-41773",
+    "exploitdb:EDB-50383"
+  ]
+}
+```
+
+#### Structured Command Extraction (src/agents/base_agent.py)
+**New methods for extracting and validating commands from LLM output:**
+
+- `_extract_commands_from_output(llm_output)` — Parses structured ACTION blocks and inline commands
+  - Pattern 1: `ACTION: tool\nACTION_INPUT: {...}`
+  - Pattern 2: Inline mentions like "run nmap -sV 10.0.0.1"
+  - Returns list of `{tool, args, purpose, validation, raw_input}`
+
+- `_validate_command_structure(tool, action_input)` — Pre-execution validation
+  - Check 1: Tool exists in RAG knowledge base
+  - Check 2: Required arguments present (nmap/hydra/sqlmap need args)
+  - Check 3: No destructive patterns (`rm -rf`, `dd if=`, `mkfs`)
+  - Check 4: Flag-value pairs complete (`-p` not missing port value)
+  - Check 5: Cross-reference syntax with RAG examples
+  - Returns `{valid: bool, issues: list, suggestions: list, confidence: float}`
+
+**Example validation failure:**
+```json
+{
+  "valid": false,
+  "issues": ["Tool 'nmap' typically requires arguments"],
+  "suggestions": ["Check nmap --help for required parameters"],
+  "tool": "nmap",
+  "confidence": 0.0
+}
+```
+
+#### Evidence-Based Command Execution Loop (src/agents/base_agent.py)
+**Enhanced ReAct loop with validation gates and retry logic:**
+
+1. **Pre-execution validation** — All commands validated before execution
+   - Invalid commands → LLM receives `VALIDATION ERROR` feedback with issues + suggestions
+   - LLM gets a chance to fix the command or choose different approach
+   - Prevents hallucinated/malformed commands from ever executing
+
+2. **Automatic retry for transient failures** — Exponential backoff for network errors
+   - Recognizes: `"timeout"`, `"connection refused"`, `"temporary failure"`, `"try again"`
+   - Max 3 retries with 1s, 2s, 4s backoff (2^retry)
+   - Non-transient errors (permission denied, invalid arg) fail immediately
+
+3. **Hallucination guard on all final answers** — Applied before returning to orchestrator
+   - Every `FINAL_ANSWER` passes through `hallucination_guard()`
+   - Multi-source validation adds `_validation_sources` list
+   - Invalid data cleaned/removed before storage in MissionMemory
+
+**Execution flow with validation:**
+```
+THOUGHT → ACTION → [VALIDATION] ─✓→ [EXECUTE] ─transient error?→ [RETRY with backoff]
+                          │                           │
+                          └─✗→ VALIDATION ERROR      └─permanent error→ OBSERVATION
+                                      ↓
+                                   LLM feedback: "Issues: ... Suggestions: ..."
+```
+
+### Comprehensive Test Suite ✅
+
+#### tests/test_hallucination_guard.py (~350 lines)
+**Unit tests for all 8 hallucination guard checks:**
+- `test_invalid_cve_format` / `test_valid_cve_format`
+- `test_invalid_cvss_score` / `test_valid_cvss_score`
+- `test_confirmed_without_evidence` / `test_confirmed_with_evidence`
+- `test_vague_version_string` / `test_valid_version_string`
+- `test_invalid_ip_address` / `test_valid_ip_address`
+- `test_cve_existence_validation` — Cross-reference with RAG
+- `test_exploit_path_validation` — EDB-ID and Metasploit paths
+- `test_command_syntax_validation` — Unmatched quotes, incomplete pipes, suspicious patterns
+- `test_nested_structure_validation` — Recursive checking of dicts/lists
+- `test_clean_output_passes` — Verify false positive rate is 0%
+
+#### tests/test_command_extraction.py (~300 lines)
+**Unit tests for command extraction and validation:**
+- `test_extract_structured_action_block` — Parse ACTION/ACTION_INPUT blocks
+- `test_extract_multiple_action_blocks` — Handle multiple commands in one output
+- `test_extract_inline_commands` — Parse "run nmap -sV 10.0.0.1" format
+- `test_validate_command_with_missing_args` — Catch missing required arguments
+- `test_validate_command_with_destructive_patterns` — Block `rm -rf`, `dd if=`, `mkfs`
+- `test_validate_command_with_incomplete_flags` — Detect `-p` missing value
+- `test_validate_command_with_valid_args` — Accept well-formed commands
+- `test_command_confidence_scoring` — Validate confidence decreases with issues
+- `test_extract_commands_from_malformed_json` — Graceful handling of bad JSON
+- `test_validation_provides_actionable_suggestions` — Helpful error messages
+
+#### tests/test_react_loop_integration.py (~400 lines)
+**Integration tests for full ReAct loop:**
+- `test_successful_react_loop_with_validation` — End-to-end success path
+- `test_react_loop_invalid_command_gets_retry` — LLM fixes invalid command after feedback
+- `test_react_loop_transient_error_retry` — Automatic retry with exponential backoff
+- `test_react_loop_hallucination_guard_on_final_answer` — Guard applied to results
+- `test_react_loop_max_iterations_reached` — Graceful failure after max iterations
+- `test_react_loop_llm_failure_handling` — Handle LLM connection errors
+- `test_react_loop_multi_source_validation` — Cross-reference findings with multiple RAG sources
+- `test_react_loop_evidence_logging` — All actions logged to MissionMemory
+- `test_cve_cross_reference_with_multiple_sources` — Validate against cve_database + exploitdb
+- `test_exploit_verification_against_exploitdb` — EDB-ID path verification
+
+**Test infrastructure:**
+- `tests/__init__.py` — Package init with docstring
+- All tests use `unittest` (no external dependencies beyond src/)
+- Mock LLM/ChromaDB/DynamicToolManager to avoid external calls
+- Can be run with: `python -m unittest tests.test_*` (requires venv with deps)
+
+### Architecture Improvements ✅
+
+**Zero-hallucination pipeline now enforced at 4 layers:**
+1. **Prompt layer** — Anti-hallucination rules in agent_prompts.py (Day 2.5)
+2. **Pydantic schemas** — output_schemas.py validates structure (Day 2.5)
+3. **Command validation** — Pre-execution checking NEW
+4. **Hallucination guard** — Post-LLM output cleaning with RAG cross-reference ENHANCED
+
+**Multi-source verification workflow:**
+```
+LLM Output
+    ↓
+[Parse JSON]
+    ↓
+[Pydantic validation] ← output_schemas.py
+    ↓
+[Hallucination guard] ← 8 checks + RAG cross-reference
+    ↓
+    ├─ CVE → Query cve_database (71,653 docs)
+    ├─ Exploit → Query exploitdb (46,437 docs)
+    ├─ Command → Query hacktricks (8,290 docs) for syntax examples
+    └─ Technique → Query mitre_attack (691 techniques)
+    ↓
+[Store in MissionMemory] ← Only validated data with _validation_sources
+```
+
+**Result metadata now includes:**
+- `_hallucination_flags: list[str]` — Issues detected (empty if clean)
+- `_guard_passed: bool` — True if zero issues found
+- `_validation_sources: list[str]` — Which RAG collections verified the data
+  - Format: `"collection_name:identifier"` (e.g., `"cve_database:CVE-2021-41773"`)
+
+### Files Modified/Created ✅
+
+**Modified:**
+- `src/agents/base_agent.py` — +185 lines (hallucination guard expansion, command validation, retry logic)
+
+**Created:**
+- `tests/__init__.py` — Test package init
+- `tests/test_hallucination_guard.py` — 17 test cases, ~350 lines
+- `tests/test_command_extraction.py` — 15 test cases, ~300 lines
+- `tests/test_react_loop_integration.py` — 11 test cases, ~400 lines
+
+**Total new code:** ~1,235 lines (src/ + tests/)
 
 ## What Was Just Completed (Day 2.5)
 
