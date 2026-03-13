@@ -108,3 +108,79 @@ class ChromaManager:
         # Sort by distance (lower = more similar for cosine)
         all_results.sort(key=lambda x: x.get("distance") or 999)
         return all_results[:n * 2]  # return top 2*n across all collections
+
+    # Phase-to-collection priority map: each phase hits its most relevant
+    # collections first to maximise signal and minimise token usage.
+    _PHASE_COLLECTIONS: dict[str, list[str]] = {
+        "recon": [
+            "hacktricks", "mitre_attack", "owasp", "seclists_meta",
+        ],
+        "enum": [
+            "hacktricks", "nuclei_templates", "seclists_meta",
+            "owasp", "mitre_attack",
+        ],
+        "vuln": [
+            "cve_database", "nuclei_templates", "exploitdb",
+            "owasp", "hacktricks",
+        ],
+        "exploit": [
+            "exploitdb", "cve_database", "payloads",
+            "hacktricks", "mitre_attack",
+        ],
+        "privesc": [
+            "privesc_techniques", "gtfobins", "exploitdb",
+            "mitre_attack", "hacktricks",
+        ],
+        "postexploit": [
+            "mitre_attack", "gtfobins", "payloads",
+            "hacktricks", "privesc_techniques",
+        ],
+        "report": [
+            "cve_database", "owasp", "mitre_attack",
+            "hacktricks", "exploitdb",
+        ],
+    }
+
+    def get_phase_rag_context(
+        self,
+        phase: str,
+        query: str,
+        n: int = 8,
+    ) -> list[dict]:
+        """
+        Phase-aware RAG query — searches the most relevant collections for the
+        given mission phase first, then falls back to general collections.
+
+        Args:
+            phase:  Mission phase name (recon/enum/vuln/exploit/privesc/postexploit/report).
+            query:  Semantic search query.
+            n:      Number of results to return per collection, top 2*n returned total.
+
+        Returns:
+            Merged, distance-ranked list of hit dicts with ``source_collection`` field.
+        """
+        # Resolve phase → collection priority list (fall back to all collections)
+        phase_key = phase.lower().replace("enumeration", "enum").replace("vuln_scan", "vuln")
+        priority_cols = self._PHASE_COLLECTIONS.get(phase_key, ALL_KNOWLEDGE_COLLECTIONS)
+
+        # Query priority collections first
+        all_results: list[dict] = []
+        seen_texts: set[str] = set()
+
+        for col_name in priority_cols:
+            try:
+                hits = self.semantic_search(col_name, query, n_results=n)
+                for h in hits:
+                    # Deduplicate by first 120 chars of text
+                    snippet = h["text"][:120]
+                    if snippet in seen_texts:
+                        continue
+                    seen_texts.add(snippet)
+                    h["source_collection"] = col_name
+                    all_results.append(h)
+            except Exception as e:
+                _log.warning(f"Phase RAG search in {col_name} failed: {e}")
+
+        # Sort by semantic distance (lower = closer match for cosine)
+        all_results.sort(key=lambda x: x.get("distance") or 999)
+        return all_results[: n * 2]

