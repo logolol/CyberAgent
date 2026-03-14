@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -53,6 +52,9 @@ _NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 # Request timeout — fail fast so agents don't block
 _TIMEOUT = 10  # seconds
+
+# Feature flag — disable by default to prevent accidental leaks/traffic
+EXTERNAL_INTEL_ENABLED = False
 
 
 class ExternalIntel:
@@ -80,6 +82,9 @@ class ExternalIntel:
 
         Falls back to cached data if API unreachable.
         """
+        if not EXTERNAL_INTEL_ENABLED:
+            return {"error": "external_intel_disabled", "cve_id": cve_id}
+
         cve_id = cve_id.upper().strip()
         cache_key = f"cve_{cve_id.replace('-', '_')}.json"
         cached = self._load_cache(cache_key)
@@ -177,6 +182,16 @@ class ExternalIntel:
 
         Returns list of {title, cve, platform, type, edb_id, url} dicts.
         """
+        if not EXTERNAL_INTEL_ENABLED:
+            return []
+
+        # Prevent leaking target IP to external APIs
+        # If query is just an IP address, abort.
+        import re
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", query.strip()):
+            _log.warning(f"[ExternalIntel] Refusing to search exploits for target IP: {query}")
+            return []
+
         cache_key = f"exploits_{self._sanitize_key(query)}.json"
         cached = self._load_cache(cache_key)
         if cached:
@@ -247,6 +262,9 @@ class ExternalIntel:
 
         Only use during recon phase — too noisy for other phases.
         """
+        if not EXTERNAL_INTEL_ENABLED:
+            return []
+
         cache_key = f"osint_{self._sanitize_key(query)}.json"
         cached = self._load_cache(cache_key, ttl=300)  # 5-min cache for OSINT
         if cached:

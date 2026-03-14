@@ -411,6 +411,31 @@ Handles all real DeepSeek-R1 patterns: think+JSON, think+fence, raw JSON, prose+
 
 ---
 
+## 🗓️ Day 4 — External Intelligence & MCP Integration (Complete)
+
+### What was built on Day 4
+Day 4 expanded the platform's situational awareness beyond the local knowledge base. We integrated:
+- **External Intelligence Module**: Safe, rate-limited access to NVD CVE API v2, ExploitDB, and OSINT (DuckDuckGo), with strict IP leakage protection.
+- **MCP PentestAI Client**: A Model Context Protocol client to consume tools and data from a local `pentestai-server` (with graceful ChromaDB fallback).
+- **Orchestrator Enhancements**: Improved phase gating, decision logic, and integration with the new intelligence sources.
+- **Comprehensive Testing**: Added 4 new test suites covering command extraction, hallucination guards, ReAct loops, and the Day 4 orchestrator logic.
+
+### Key Features
+- **Zero-Config Fallbacks**: If MCP is down, the system seamlessly uses local RAG. If RAG fails, it tries external intel (if enabled).
+- **Security-First**: External intel is disabled by default (`EXTERNAL_INTEL_ENABLED = False`) and sanitizes queries to prevent target IP leakage.
+- **Robust Validation**: The `hallucination_guard` now cross-references findings against NVD and ExploitDB data.
+
+### Day 4 Validation Results
+
+```
+✅ External Intel        : disabled by default, correct fallback logic verified
+✅ MCP Integration       : graceful degradation to ChromaDB confirmed
+✅ New Tests             : 4 test suites passing (Command Extraction, Hallucination Guard, ReAct Loop, Orchestrator Logic)
+✅ IP Leak Prevention    : strict query sanitization in search_exploits()
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash
