@@ -1,5 +1,37 @@
 # Progress — Multi-Agent PentestAI
 
+## Planned Intelligence Improvements (pre-EnumerationAgent)
+
+### 1. Confidence scoring on recon findings
+All findings should carry confidence: high/medium/low
+  - high: confirmed by 2+ tools or direct HTTP header
+  - medium: single tool output
+  - low: indirect inference or passive OSINT
+EnumAgent will prioritize high-confidence findings first.
+
+### 2. Rich Orchestrator briefing from recon findings
+OrchestratorAgent._build_agent_briefing("enumeration") must:
+  - Read technologies[] from ReconAgent output
+  - Map each technology to known CVEs via RAG query
+  - Map each technology to nuclei templates
+  - Return targeted instructions like:
+    "Apache 2.2.8 → test CVE-2017-7679, run nuclei apache templates"
+    "WebDAV → test PUT method, check PROPFIND disclosure"
+  Not just: "enumerate the target"
+
+### 3. MITRE chain flows to Orchestrator
+mitre_techniques[] from each agent must be read by
+OrchestratorAgent._analyze_phase_result() and accumulated
+into a running attack chain stored in MissionMemory.
+This feeds the ReportingAgent's ATT&CK Navigator output.
+
+### 4. Cross-agent RAG memory
+Each agent queries ChromaDB mission collection at start:
+  chroma.get_mission_context(mission_id, phase_query)
+This lets EnumAgent "remember" what ReconAgent found
+even across separate Python processes.
+Implements true persistent agent memory.
+
 ## ✅ Completed — Day 5 (ReconAgent + Intelligence Architecture)
 
 Sprint: S5-S6  

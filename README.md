@@ -517,18 +517,21 @@ python3 src/memory/mission_memory.py
 ## 🗓️ Roadmap
 
 | Sprint | Focus | Status |
-|---|---|---|
-| **S1-S2** | Environment, RAG (146K docs), core modules (incl. DynamicToolManager) | ✅ **DONE** |
-| **S3-S4** | Orchestrator Agent + BaseAgent + hardening (hallucination guard, phase gates, JSON fix) | ✅ **DONE** |
-| S5-S6 | Recon Agent (parallel: DNS, OSINT, active) | 🔜 Next |
-| S7-S8 | Enumeration + VulnScan Agents | ⏳ |
-| S9-S11 | Exploitation Agent (parallel vectors) | ⏳ |
-| S12-S13 | PrivEsc + Post-Exploit Agents | ⏳ |
-| S14-S15 | Reporting Agent (CVSS + MITRE ATT&CK) | ⏳ |
-| S16-S17 | Full run on Metasploitable2 + ComunikCRM | ⏳ |
-| S18 | Benchmarks + Phase 1 docs | ⏳ |
-| S19-S20 | Ansible playbooks + Mitigation Agent | ⏳ |
-| S21-S22 | Phase 2 end-to-end test + PFE defense | ⏳ |
+|--------|-------|--------|
+| S1-S2 | Environment + RAG (147K docs, 15 collections) + DynamicToolManager (4,309 tools) | ✅ |
+| S2.5 | Prompt library (8 agents, 2,726 lines) + Lean Modelfiles (265/292 tokens) | ✅ |
+| S3-S4 | OrchestratorAgent + BaseAgent (ReAct loop) + main.py | ✅ |
+| S3.5 | Hardening: adaptive tokens, lean modelfiles, hallucination guard (8 checks), phase gates | ✅ |
+| S4 | Anti-hallucination 8-check system + 43 unit tests + phase-aware RAG routing | ✅ |
+| S4.5 | MCP PentestAI client + external intel fallback + command validation | ✅ |
+| S5-S6 | ReconAgent — LLM+RAG+MITRE wave-based passive recon, 30s internal targets | ✅ |
+| S7-S8 | EnumerationAgent — nmap, service fingerprint, WebDAV, active probing | 🔜 |
+| S9-S11 | ExploitationAgent — CVE matching, exploit execution, shell acquisition | ⏳ |
+| S12-S13 | PrivEscAgent + PostExploitAgent | ⏳ |
+| S14-S15 | ReportingAgent — CVSS scoring, MITRE ATT&CK chain, executive summary | ⏳ |
+| S16-S17 | End-to-end mission run + ComunikCRM authorized test | ⏳ |
+| S18 | Benchmarks, accuracy metrics, Phase 1 documentation | ⏳ |
+| S19-S22 | Ansible remediation + Phase 2 + PFE defense | ⏳ |
 
 ---
 
