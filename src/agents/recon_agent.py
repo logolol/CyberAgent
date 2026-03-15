@@ -18,6 +18,7 @@ import concurrent.futures
 import concurrent.futures.thread
 import ipaddress
 import json
+import psutil
 import re
 import shutil
 import socket
@@ -177,8 +178,33 @@ class ReconAgent(BaseAgent):
 
     WAVE_1_TOOLS = ["dns_resolve", "dns_all_records", "whois_domain", "cert_transparency", "security_headers"]
     MAX_WAVES = 3
-    MAX_CONCURRENT = 3
-    TOOL_TIMEOUT = 45
+    MAX_CONCURRENT = 5
+    DEFAULT_TOOL_TIMEOUT = 30
+    TOOL_TIMEOUTS: dict[str, int] = {
+        "dns_resolve": 10,
+        "dns_all_records": 10,
+        "reverse_dns": 10,
+        "mx_lookup": 10,
+        "ns_lookup": 10,
+        "txt_lookup": 10,
+        "spf_check": 10,
+        "security_headers": 10,
+        "cert_transparency": 15,
+        "wayback_check": 15,
+        "robots_passive": 10,
+        "ssl_check": 10,
+        "whatweb_passive": 20,
+        "whatweb_full": 25,
+        "wafw00f_check": 20,
+        "curl_headers": 10,
+        "whois_domain": 20,
+        "whois_ip": 15,
+        "asn_lookup": 15,
+        "subfinder_passive": 40,
+        "theharvester_ddg": 60,
+        "theharvester_bing": 60,
+        "amass_passive": 60,
+    }
     OUTPUT_TRUNCATE = 2000
 
     _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -329,18 +355,25 @@ class ReconAgent(BaseAgent):
         """Run wave tools in batches of up to MAX_CONCURRENT workers."""
         del wave_num  # wave_num is for readability in caller logs
         results: dict[str, str] = {}
+        cpu_load = psutil.cpu_percent(interval=0.1)
+        workers = 2 if cpu_load > 80 else self.MAX_CONCURRENT
+        workers = max(1, workers)
 
-        for batch_start in range(0, len(tools), self.MAX_CONCURRENT):
-            batch = tools[batch_start: batch_start + self.MAX_CONCURRENT]
+        for batch_start in range(0, len(tools), workers):
+            batch = tools[batch_start: batch_start + workers]
+            batch_timeout = max(
+                self.TOOL_TIMEOUTS.get(tool_name, self.DEFAULT_TOOL_TIMEOUT)
+                for tool_name in batch
+            ) + 10
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(self._run_single_tool, tool_name): tool_name
                     for tool_name in batch
                 }
 
                 try:
-                    for future in concurrent.futures.as_completed(futures, timeout=self.TOOL_TIMEOUT + 10):
+                    for future in concurrent.futures.as_completed(futures, timeout=batch_timeout):
                         tool_name = futures[future]
                         try:
                             output = future.result(timeout=1)
@@ -356,7 +389,8 @@ class ReconAgent(BaseAgent):
                         if future.done():
                             continue
                         future.cancel()
-                        results[tool_name] = f"[TIMEOUT after {self.TOOL_TIMEOUT}s]"
+                        tool_timeout = self.TOOL_TIMEOUTS.get(tool_name, self.DEFAULT_TOOL_TIMEOUT)
+                        results[tool_name] = f"[TIMEOUT after {tool_timeout}s]"
                         self.log_warning(f"⏱ {tool_name}: timed out")
 
         return results
@@ -384,11 +418,12 @@ class ReconAgent(BaseAgent):
             return f"[SKIPPED: tool not found: {binary}]"
 
         args = self._render_args(spec.get("args", []))
+        timeout = self.TOOL_TIMEOUTS.get(tool_name, self.DEFAULT_TOOL_TIMEOUT)
         result = self.tools.use(
             binary,
             args=args,
             purpose=spec.get("purpose", "passive recon"),
-            timeout=self.TOOL_TIMEOUT,
+            timeout=timeout,
         )
 
         output: str
@@ -423,6 +458,10 @@ class ReconAgent(BaseAgent):
         Let the LLM choose next passive tools from unused catalog.
         Returns (next_tools, done).
         """
+        target_type = self._detect_target_type()
+        if target_type == "internal":
+            return self._heuristic_next_wave(wave_num)
+
         unused_tools = [
             tool_name for tool_name in self.tool_specs.keys()
             if tool_name not in self.all_raw_outputs and self.available_tools.get(tool_name, False)
@@ -516,6 +555,44 @@ Return JSON ONLY:
 
         fallback = self._fallback_next_tools(wave_num)
         return fallback, len(fallback) == 0
+
+    def _heuristic_next_wave(self, wave_num: int) -> tuple[list[str], bool]:
+        """Fast deterministic wave planning for internal targets."""
+        unused = {
+            tool_name for tool_name in self.tool_specs
+            if tool_name not in self.all_raw_outputs and self.available_tools.get(tool_name, False)
+        }
+
+        def _pick(candidates: list[str]) -> list[str]:
+            selected: list[str] = []
+            for tool_name in candidates:
+                if tool_name not in unused:
+                    continue
+                if self.tool_specs[tool_name].get("requires_ip") and not self.resolved_ip:
+                    continue
+                selected.append(tool_name)
+            return selected[:3]
+
+        if wave_num == 1:
+            tools = _pick([
+                "security_headers",
+                "robots_passive",
+                "wafw00f_check",
+                "whatweb_passive",
+                "ssl_check",
+            ])
+            return tools, False
+
+        if wave_num == 2:
+            tools = _pick([
+                "whatweb_full",
+                "curl_headers",
+                "wayback_check",
+                "whatweb_passive",
+            ])
+            return tools, False
+
+        return [], True
 
     def _llm_with_timeout(self, prompt: str, timeout: int = 90) -> str:
         """
