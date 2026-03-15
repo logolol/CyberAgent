@@ -395,7 +395,7 @@ Returns `{"_hallucination_flags": [...], "_guard_passed": bool}` — never raise
 
 Handles all real DeepSeek-R1 patterns: think+JSON, think+fence, raw JSON, prose+JSON, unclosed think. Never raises — returns `{"error": "parse_failed"}` as last resort.
 
-**Result:** Smoke test (`python3 main.py --target 127.0.0.1 --phase full`) runs with **zero JSON extraction failures**.
+**Result:** Smoke test (`python3 main.py --target <lab-target> --phase full`) runs with **zero JSON extraction failures**.
 
 ---
 
@@ -405,7 +405,7 @@ Handles all real DeepSeek-R1 patterns: think+JSON, think+fence, raw JSON, prose+
 ✅ Modelfile token count  : reasoning=265, pentest=292 (both <600)
 ✅ Hallucination guard    : 7 flags caught from adversarial test input
 ✅ Phase gates            : empty mission correctly blocks all non-recon phases
-✅ Smoke test             : main.py --target 127.0.0.1 exits 0, zero JSON failures
+✅ Smoke test             : main.py --target <lab-target> exits 0, zero JSON failures
 ✅ validate_env.py        : 24/24 PASS, 0 WARN, 0 FAIL
 ```
 
@@ -432,6 +432,63 @@ Day 4 expanded the platform's situational awareness beyond the local knowledge b
 ✅ MCP Integration       : graceful degradation to ChromaDB confirmed
 ✅ New Tests             : 4 test suites passing (Command Extraction, Hallucination Guard, ReAct Loop, Orchestrator Logic)
 ✅ IP Leak Prevention    : strict query sanitization in search_exploits()
+```
+
+---
+
+## 🗓️ Day 5 — ReconAgent: Intelligent Wave-Based Passive Reconnaissance (Complete)
+
+### Architecture
+
+ReconAgent now uses an intelligence-first wave loop:
+
+1. Execute passive tools in parallel (`ThreadPoolExecutor`)
+2. Build compact evidence summary from real tool outputs
+3. Inject phase-aware RAG context (`get_phase_rag_context("recon", ...)`)
+4. Inject MITRE ATT&CK recon context (`mitre_attack` collection)
+5. Ask `cyberagent-pentest:14b` for structured JSON next-step decision
+6. Validate next tools against allowed/available tool whitelist
+7. Execute next wave, then parse findings with regex extractors
+8. Guard outputs with `hallucination_guard()` and persist to MissionMemory
+
+Heuristic planning remains as fallback only when LLM response is unavailable or unparsable.
+
+### Recon Passive Tool Coverage
+
+Recon supports a broad passive catalog including:
+- DNS resolution/records (`dig`, `host`)
+- WHOIS/ASN (`whois`)
+- Certificate transparency and archive checks (`curl`)
+- Subdomain OSINT (`subfinder`, `amass`, `dnsx`, `theHarvester` when available)
+- Web fingerprinting and WAF checks (`whatweb`, `wafw00f`)
+- HTTP header and robots inspection (`curl`)
+
+### MITRE ATT&CK Coverage (Recon-focused)
+
+Tool outputs are mapped to recon techniques and stored in findings:
+- `T1590.001` / `T1590.002` / `T1590.006`
+- `T1591`
+- `T1592` / `T1592.002`
+- `T1596.003`
+- `T1583.001`
+
+### Intelligence Standard (All Agents)
+
+All specialist agents are expected to operate with the same decision pattern:
+- LLM reasoning grounded by RAG evidence
+- MITRE ATT&CK context awareness
+- Structured output validation before persistence
+
+This keeps actions evidence-driven and auditable across the full mission chain.
+
+### Day 5 Snapshot
+
+```
+✅ ReconAgent wave engine    : intelligent LLM+RAG+MITRE planning
+✅ Parallel passive execution: bounded concurrency with CPU backoff
+✅ Tool timeout controls     : per-tool timeout policy
+✅ MITRE tracking            : technique mapping in recon findings
+✅ Runtime performance       : ~30s internal/lab passive recon run
 ```
 
 ---

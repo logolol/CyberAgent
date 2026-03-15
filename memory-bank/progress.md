@@ -1,5 +1,34 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 5 (ReconAgent + Intelligence Architecture)
+
+Sprint: S5-S6  
+Commits: `b4fc799`, `862e55a`, pending Day 5 intelligence/docs commit
+
+### Core Build
+- [x] `src/agents/recon_agent.py` — full passive recon engine
+- [x] Wave-based execution with bounded parallel batches (up to 3 waves)
+- [x] Dynamic passive tool catalog with runtime availability checks
+- [x] Per-tool timeout policy for faster failure handling
+- [x] Target type detection (`internal` / `domain` / `ip`)
+
+### Intelligence Loop (Recon)
+- [x] LLM + RAG + MITRE context on wave planning via `_intelligent_next_wave()`
+- [x] `get_phase_rag_context("recon", query)` phase-aware retrieval
+- [x] Dedicated MITRE context retrieval from `mitre_attack`
+- [x] LLM JSON decision fields: `next_tools`, `done`, `reasoning`, `mitre_technique`
+- [x] Heuristic fallback retained for LLM hard-failure conditions only
+
+### MITRE Tracking
+- [x] `mitre_techniques` added to recon findings schema
+- [x] Tool-to-technique mapping integrated in extraction stage
+- [x] MITRE techniques persisted to MissionMemory from recon findings
+
+### Validation
+- [x] Recon speed test completed in ~30s on internal/lab target
+- [x] Internal run completed without repeated LLM-timeout spam
+- [x] Recon output remains structured and MissionMemory-compatible
+
 ## ✅ Completed — Day 4 (Enhanced Anti-Hallucination & Command Validation)
 
 ### Enhanced Hallucination Guard System

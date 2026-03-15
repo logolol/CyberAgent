@@ -313,6 +313,7 @@ class ReconAgent(BaseAgent):
             "subdomains": [],     # [str]
             "technologies": [],   # {"name": str, "version": str, "evidence": str, "source": str}
             "osint_intel": [],    # {"type": str, "value": str, "source": str}
+            "mitre_techniques": [],  # {"technique_id": str, "technique_name": str, "sub_technique": str, "evidence": str}
             "network_info": {},   # {"org": str, "registrar": str, "country": str, "asn": str, "ip_range": str}
             "web_info": {"headers": {}},
         }
@@ -455,12 +456,27 @@ class ReconAgent(BaseAgent):
 
     def _decide_next_wave(self, wave_num: int, wave_results: dict[str, str]) -> tuple[list[str], bool]:
         """
-        Let the LLM choose next passive tools from unused catalog.
-        Returns (next_tools, done).
+        Unified wave planner for all target types.
+        Uses LLM + RAG + MITRE guidance, with heuristic fallback only on hard failure.
         """
-        target_type = self._detect_target_type()
-        if target_type == "internal":
-            return self._heuristic_next_wave(wave_num)
+        return self._intelligent_next_wave(wave_num, wave_results)
+
+    def _intelligent_next_wave(self, wave_num: int, wave_results: dict[str, str]) -> tuple[list[str], bool]:
+        """
+        LLM + RAG guided wave decision for all target types.
+        Falls back to heuristic only when LLM parsing/response fails.
+        """
+        summary_lines: list[str] = []
+        for tool_name, output in wave_results.items():
+            if output and not any(output.startswith(prefix) for prefix in ("[TIMEOUT", "[ERROR", "[TOOL_NOT_AVAILABLE]")):
+                first_line = next(
+                    (line.strip() for line in output.split("\n") if line.strip() and not line.startswith(";")),
+                    "[no output]",
+                )
+                summary_lines.append(f"{tool_name}: {first_line[:80]}")
+            else:
+                summary_lines.append(f"{tool_name}: failed")
+        wave_summary = "\n".join(summary_lines)[:300]
 
         unused_tools = [
             tool_name for tool_name in self.tool_specs.keys()
@@ -470,56 +486,63 @@ class ReconAgent(BaseAgent):
         if not unused_tools:
             return [], True
 
-        summary = self._summarize_wave_output(wave_results)
-        rag_hits = self.chroma.get_rag_context(
-            f"passive recon next steps for {self.target}",
-            collections=["hacktricks", "mitre_attack", "owasp"],
-            n=3,
-        )
-        rag_text = "\n".join(
-            f"- [{h.get('source_collection', 'rag')}] {h.get('text', '')[:180]}"
-            for h in rag_hits[:4]
-        ) or "- No RAG context found."
+        rag_context = ""
+        mitre_context = ""
+        try:
+            rag_results = self.chroma.get_phase_rag_context(
+                phase="recon",
+                query=f"passive reconnaissance {self.target} wave {wave_num} findings",
+                n=2,
+            )
+            if rag_results:
+                rag_context = "\n".join(hit.get("text", "")[:150] for hit in rag_results[:2])
+        except Exception:
+            rag_context = ""
 
-        prompt = f"""You are selecting PASSIVE reconnaissance steps only.
-Target: {self.target}
-Resolved IP: {self.resolved_ip or "not resolved"}
-Current wave: {wave_num}
+        try:
+            mitre_results = self.chroma.get_rag_context(
+                f"MITRE ATT&CK reconnaissance TA0043 passive {self.target}",
+                collections=["mitre_attack"],
+                n=2,
+            )
+            if mitre_results:
+                mitre_context = "\n".join(hit.get("text", "")[:100] for hit in mitre_results[:2])
+        except Exception:
+            mitre_context = ""
+
+        target_type = self._detect_target_type()
+        available_preview = unused_tools[:10]
+
+        prompt = f"""Pentest recon advisor. Target: {self.target} ({target_type}, IP: {self.resolved_ip or "unknown"})
 
 Wave results summary:
-{summary}
+{wave_summary}
 
-Current findings:
-- hosts: {len(self.all_findings["hosts"])}
-- subdomains: {len(self.all_findings["subdomains"])}
-- technologies: {len(self.all_findings["technologies"])}
-- osint items: {len(self.all_findings["osint_intel"])}
+Relevant techniques:
+{rag_context[:200] if rag_context else "standard passive recon"}
 
-RAG hints:
-{rag_text}
+MITRE TA0043 context:
+{mitre_context[:150] if mitre_context else "T1590 Gather Victim Network Information"}
 
-Available unused tools:
-{json.dumps(unused_tools)}
+Available tools: {available_preview}
 
-Rules:
-- PASSIVE reconnaissance only.
-- Choose at most 3 tools.
-- Only choose tools likely to reveal NEW data.
-- If recon is sufficient, set done=true.
+Based on findings, select up to 3 tools for next wave OR declare done.
+Prioritize tools that reveal NEW attack surface.
 
 Return JSON ONLY:
 {{
   "done": false,
-  "reasoning": "brief reason",
-  "next_tools": ["tool_a", "tool_b"],
-  "priority_finding": "short sentence"
+  "next_tools": ["tool1", "tool2"],
+  "reasoning": "one sentence",
+  "mitre_technique": "T1590.X"
 }}
 """
         try:
-            raw = self._llm_with_timeout(prompt, timeout=90)
+            raw = self._llm_with_timeout(prompt, timeout=60)
             if not raw:
-                fallback = self._fallback_next_tools(wave_num)
-                return fallback, len(fallback) == 0
+                self.log_warning("LLM unavailable — using heuristic fallback")
+                return self._heuristic_next_wave(wave_num)
+
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
             data = self._extract_json_dict(raw)
 
@@ -542,9 +565,17 @@ Return JSON ONLY:
                     filtered.append(tool_name)
                 filtered = filtered[:self.MAX_CONCURRENT]
 
-                key_finding = str(data.get("priority_finding", "")).strip()
-                if key_finding:
-                    self.log_info(f"🔍 Key finding: {key_finding}")
+                mitre_tag = str(data.get("mitre_technique", "")).strip()
+                if mitre_tag:
+                    self.memory.log_action(
+                        agent_name=self.agent_name,
+                        action="mitre_technique",
+                        result=mitre_tag,
+                    )
+
+                reasoning = str(data.get("reasoning", "")).strip()
+                if reasoning:
+                    self.log_info(f"🧠 AI reasoning: {reasoning}")
 
                 if done and not filtered:
                     return [], True
@@ -553,8 +584,8 @@ Return JSON ONLY:
         except Exception as exc:
             self.log_warning(f"LLM wave decision failed: {exc}")
 
-        fallback = self._fallback_next_tools(wave_num)
-        return fallback, len(fallback) == 0
+        self.log_warning("LLM unavailable — using heuristic fallback")
+        return self._heuristic_next_wave(wave_num)
 
     def _heuristic_next_wave(self, wave_num: int) -> tuple[list[str], bool]:
         """Fast deterministic wave planning for internal targets."""
@@ -728,6 +759,8 @@ Return JSON ONLY:
             ):
                 continue
 
+            self._track_mitre_for_tool(tool_name)
+
             if tool_name in {"dns_resolve", "dns_all_records", "mx_lookup", "ns_lookup", "txt_lookup", "spf_check"}:
                 self._parse_dns_output(output, tool_name)
             elif tool_name in {"whois_domain", "whois_ip", "asn_lookup"}:
@@ -755,6 +788,83 @@ Return JSON ONLY:
                 self._parse_robots_output(output, tool_name)
             elif tool_name == "host_lookup":
                 self._parse_dns_output(output, tool_name)
+
+    def _track_mitre_for_tool(self, tool_name: str):
+        mapping: dict[str, dict[str, str]] = {
+            "dns_resolve": {
+                "technique_id": "T1590",
+                "technique_name": "Gather Victim Network Information",
+                "sub_technique": "T1590.002",
+            },
+            "dns_all_records": {
+                "technique_id": "T1590",
+                "technique_name": "Gather Victim Network Information",
+                "sub_technique": "T1590.002",
+            },
+            "whois_domain": {
+                "technique_id": "T1590",
+                "technique_name": "Gather Victim Network Information",
+                "sub_technique": "T1590.001",
+            },
+            "whois_ip": {
+                "technique_id": "T1590",
+                "technique_name": "Gather Victim Network Information",
+                "sub_technique": "T1590.001",
+            },
+            "cert_transparency": {
+                "technique_id": "T1596",
+                "technique_name": "Search Open Technical Databases",
+                "sub_technique": "T1596.003",
+            },
+            "subfinder_passive": {
+                "technique_id": "T1583",
+                "technique_name": "Acquire Infrastructure",
+                "sub_technique": "T1583.001",
+            },
+            "security_headers": {
+                "technique_id": "T1592",
+                "technique_name": "Gather Victim Host Information",
+                "sub_technique": "T1592",
+            },
+            "wafw00f_check": {
+                "technique_id": "T1590",
+                "technique_name": "Gather Victim Network Information",
+                "sub_technique": "T1590.006",
+            },
+            "whatweb_passive": {
+                "technique_id": "T1592",
+                "technique_name": "Gather Victim Host Information",
+                "sub_technique": "T1592.002",
+            },
+            "whatweb_full": {
+                "technique_id": "T1592",
+                "technique_name": "Gather Victim Host Information",
+                "sub_technique": "T1592.002",
+            },
+        }
+        if tool_name.startswith("theharvester_"):
+            mapping_value = {
+                "technique_id": "T1591",
+                "technique_name": "Gather Victim Organization Information",
+                "sub_technique": "T1591",
+            }
+        else:
+            mapping_value = mapping.get(tool_name)
+
+        if not mapping_value:
+            return
+
+        record = {
+            **mapping_value,
+            "evidence": f"{tool_name} confirmed recon evidence for {self.target}",
+        }
+        existing = {
+            (item.get("sub_technique", ""), item.get("evidence", ""))
+            for item in self.all_findings["mitre_techniques"]
+        }
+        key = (record["sub_technique"], record["evidence"])
+        if key not in existing:
+            self.all_findings["mitre_techniques"].append(record)
 
     def _parse_dns_output(self, output: str, source: str):
         for ip in self._extract_ips(output):
@@ -1157,6 +1267,15 @@ Return JSON ONLY:
             seen_osint.add(key)
             osint.append(item)
 
+        mitre_techniques = []
+        seen_mitre = set()
+        for item in self.all_findings["mitre_techniques"]:
+            key = (item.get("technique_id", ""), item.get("sub_technique", ""))
+            if key in seen_mitre:
+                continue
+            seen_mitre.add(key)
+            mitre_techniques.append(item)
+
         ips = [h["ip"] for h in hosts if self._is_valid_ipv4(h.get("ip", ""))]
 
         return {
@@ -1168,6 +1287,7 @@ Return JSON ONLY:
             "subdomains": subdomains,
             "technologies": technologies,
             "osint_intel": osint,
+            "mitre_techniques": mitre_techniques,
             "network_info": self.all_findings["network_info"],
             "web_info": self.all_findings["web_info"],
             "raw_tool_count": len(self.all_raw_outputs),
@@ -1201,8 +1321,13 @@ Return JSON ONLY:
                 },
             )
 
-        for technique_id in ("T1590", "T1591", "T1592", "T1593", "T1594", "T1596"):
-            self.memory.add_mitre_technique(technique_id)
+        for technique in findings.get("mitre_techniques", []):
+            technique_id = (
+                str(technique.get("sub_technique", "")).strip()
+                or str(technique.get("technique_id", "")).strip()
+            )
+            if technique_id:
+                self.memory.add_mitre_technique(technique_id)
 
         self.memory.save_state()
 
