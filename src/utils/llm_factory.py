@@ -140,6 +140,56 @@ def get_reasoning_llm(task_complexity: str = "medium") -> dict:
     }
 
 
+def warm_model(role: str = "default") -> bool:
+    """
+    Pre-loads the model into Ollama's RAM by sending
+    a minimal keep-alive request.
+
+    Call this ONCE before starting any agent that uses LLM.
+    Subsequent LLM calls will find the model already loaded
+    and will complete in ~30-60s instead of timing out.
+
+    Returns True if model is warm and responding.
+    """
+    import ollama
+    import time
+    from rich.console import Console
+
+    cfg = _load_config()
+    base_url = cfg["ollama_base_url"]
+    role_cfg = cfg["models"].get(role, cfg["models"]["default"])
+    model_name = role_cfg.get("name", role_cfg.get("base_model", "qwen2.5:14b-instruct-q4_K_M"))
+
+    console = Console()
+    console.print(
+        f"[cyan]⚡ Warming model {model_name}...[/]",
+        end=" ",
+    )
+
+    try:
+        c = ollama.Client(host=base_url)
+        start = time.time()
+
+        # Minimal prompt — just loads the model into RAM
+        # keep_alive="10m" keeps it warm for 10 minutes
+        c.chat(
+            model=model_name,
+            messages=[{"role": "user", "content": "ready"}],
+            options={
+                "num_predict": 3,
+                "temperature": 0.0,
+            },
+            keep_alive="10m",
+        )
+        elapsed = time.time() - start
+        console.print(f"[green]✓ warm ({elapsed:.1f}s)[/]")
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]⚠ warm failed: {e}[/]")
+        return False
+
+
 def get_ollama_client():
     import ollama
     cfg = _load_config()
