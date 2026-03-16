@@ -106,7 +106,6 @@ class OrchestratorAgent(BaseAgent):
     ATTACK_CHAIN = [
         "recon",
         "enumeration",
-        "vuln_scan",
         "exploitation",
         "privesc",
         "postexploit",
@@ -116,8 +115,7 @@ class OrchestratorAgent(BaseAgent):
     # Static phase gates: (description, result_field_to_check, minimum_value)
     PHASE_GATES: dict[str, tuple] = {
         "enumeration":  ("recon found live hosts",       "hosts_found",       1),
-        "vuln_scan":    ("enum found open services",     "services_found",    1),
-        "exploitation": ("vulnscan found exploitable",   "exploitable_vulns", 1),
+        "exploitation": ("enum found exploitable vulns", "exploitable_vulns", 1),
         "privesc":      ("exploitation got a shell",     "shells_obtained",   1),
         "postexploit":  ("privesc got elevated access",  "root_obtained",     True),
         "reporting":    ("always runs",                  None,                None),
@@ -511,6 +509,9 @@ class OrchestratorAgent(BaseAgent):
 
     def _get_phases_to_run(self, phase: str) -> list[str]:
         """Determine which phases to execute based on the requested scope."""
+        # Backward compatibility: vuln_scan is merged into enumeration.
+        if phase == "vuln_scan":
+            phase = "enumeration"
         if phase == "full":
             return list(self.ATTACK_CHAIN)
         if phase in self.ATTACK_CHAIN:
@@ -529,13 +530,19 @@ class OrchestratorAgent(BaseAgent):
         Gate logic:
           recon       → always runs
           enumeration → need ≥1 live host in MissionMemory
-          vuln_scan   → need ≥1 open port across all hosts
-          exploitation→ need ≥1 exploitable vuln confirmed by tool
+          exploitation→ need exploitable_vulns from EnumVulnAgent output
           privesc     → need ≥1 confirmed shell (any user)
           postexploit → need ≥1 confirmed shell (any user is enough)
           reporting   → always runs
         """
         hosts = self.memory._state.get("hosts", {})
+        enum_result = self.phase_results.get("enumeration", {}).get("result", {})
+        exploitable_from_enum = 0
+        if isinstance(enum_result, dict):
+            try:
+                exploitable_from_enum = int(enum_result.get("exploitable_vulns", 0) or 0)
+            except (TypeError, ValueError):
+                exploitable_from_enum = 0
 
         gates: dict = {
             "recon": lambda: (
@@ -550,17 +557,9 @@ class OrchestratorAgent(BaseAgent):
                 len(hosts) > 0,
                 f"Need live hosts. Found: {len(hosts)}",
             ),
-            "vuln_scan": lambda: (
-                any(len(h.get("ports", [])) > 0 for h in hosts.values()),
-                f"Need open ports. Found: "
-                f"{sum(len(h.get('ports', [])) for h in hosts.values())} total",
-            ),
             "exploitation": lambda: (
-                any(
-                    any(v.get("exploitable") for v in h.get("vulnerabilities", []))
-                    for h in hosts.values()
-                ),
-                "Need ≥1 exploitable vulnerability confirmed by tool evidence",
+                exploitable_from_enum > 0,
+                f"Need exploitable_vulns from EnumVulnAgent output. Found: {exploitable_from_enum}",
             ),
             "privesc": lambda: (
                 any(len(h.get("shells", [])) > 0 for h in hosts.values()),
@@ -709,8 +708,8 @@ class OrchestratorAgent(BaseAgent):
         """
         mapping = {
             "recon":       ("agents.recon_agent",       "ReconAgent"),
-            "enumeration": ("agents.enumeration_agent", "EnumerationAgent"),
-            "vuln_scan":   ("agents.vuln_scan_agent",   "VulnScanAgent"),
+            "enumeration": ("agents.enum_vuln_agent",   "EnumVulnAgent"),
+            "vuln_scan":   ("agents.enum_vuln_agent",   "EnumVulnAgent"),
             "exploitation":("agents.exploitation_agent","ExploitationAgent"),
             "privesc":     ("agents.privesc_agent",     "PrivEscAgent"),
             "postexploit": ("agents.postexploit_agent", "PostExploitAgent"),
@@ -754,7 +753,10 @@ class OrchestratorAgent(BaseAgent):
             if phase_name == "recon":
                 detail = f"{inner.get('hosts_found', '?')} hosts"
             elif phase_name == "enumeration":
-                detail = f"{inner.get('services_found', '?')} services"
+                detail = (
+                    f"{inner.get('services_found', '?')} services, "
+                    f"{inner.get('exploitable_vulns', '?')} exploitable vulns"
+                )
             elif phase_name == "vuln_scan":
                 detail = f"{inner.get('exploitable_vulns', '?')} exploitable vulns"
             elif phase_name == "exploitation":

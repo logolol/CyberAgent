@@ -1311,7 +1311,37 @@ Return JSON ONLY:
                 result=f"{tech.get('name', '')} {tech.get('version', '')}".strip(),
             )
 
+        web_info = findings.get("web_info", {}) if isinstance(findings.get("web_info", {}), dict) else {}
+        server_header = str(web_info.get("server_header", "")).strip()
+        if server_header:
+            self.memory.log_action(
+                agent_name=self.agent_name,
+                action="server_header",
+                result=server_header,
+            )
+
+        waf_status = str(web_info.get("waf", "")).strip()
+        if waf_status:
+            self.memory.log_action(
+                agent_name=self.agent_name,
+                action="waf_status",
+                result=waf_status,
+            )
+
+        missing_headers = web_info.get("missing_security_headers", [])
+        if isinstance(missing_headers, list) and missing_headers:
+            self.memory.log_action(
+                agent_name=self.agent_name,
+                action="missing_security_headers",
+                result=", ".join(str(h) for h in missing_headers[:10]),
+            )
+
         for osint_item in findings.get("osint_intel", []):
+            self.memory.log_action(
+                agent_name=self.agent_name,
+                action="osint_intel",
+                result=json.dumps(osint_item, default=str)[:300],
+            )
             self.memory.store_in_chroma(
                 finding_text=json.dumps(osint_item),
                 metadata={
@@ -1322,14 +1352,24 @@ Return JSON ONLY:
             )
 
         for technique in findings.get("mitre_techniques", []):
-            technique_id = (
-                str(technique.get("sub_technique", "")).strip()
-                or str(technique.get("technique_id", "")).strip()
-            )
+            if isinstance(technique, dict):
+                technique_id = (
+                    str(technique.get("sub_technique", "")).strip()
+                    or str(technique.get("technique_id", "")).strip()
+                )
+            else:
+                technique_id = str(technique).strip()
             if technique_id:
                 self.memory.add_mitre_technique(technique_id)
 
+        state = self.memory.state
+        state["action_log"] = list(state.get("attack_chain", []))
         self.memory.save_state()
+        actions = state.get("action_log", [])
+        self.log_success(
+            f"Memory written: {len(actions)} actions, "
+            f"{len(state.get('hosts', {}))} hosts stored"
+        )
 
     def _print_summary(self, findings: dict[str, Any], waves_completed: int):
         table = Table(title="Recon Summary", border_style="cyan")
