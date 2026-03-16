@@ -740,7 +740,7 @@ class OrchestratorAgent(BaseAgent):
 
         synthesis_prompt = f"""You are preparing an attack briefing for
 the EnumerationAgent. You have pre-fetched knowledge base data
-about technologies discovered during passive reconnaissance.
+about technologies discovered during reconnaissance.
 
 Target: {self.memory.target}
 Mission state summary: {self.memory.get_full_context()[:300]}

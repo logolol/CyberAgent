@@ -1648,8 +1648,8 @@ Based on this reasoning, return your assessment:
                     "EnumVulnAgent", "mitre_technique", mitre
                 )
 
-            if reasoning.get("exploitable") and \
-               reasoning.get("confidence") == "high":
+            if (reasoning.get("exploitable")
+                    and reasoning.get("confidence") == "high"):
                 self.log_success(
                     f"⚡ HIGH CONFIDENCE EXPLOITABLE: "
                     f"{vuln.get('cve', '?')} [{service}]"
