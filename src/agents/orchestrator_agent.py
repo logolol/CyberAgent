@@ -589,6 +589,11 @@ class OrchestratorAgent(BaseAgent):
           3. Tool examples  — concrete CLI commands the specialist should prefer
           4. LLM synthesis  — DeepSeek-R1 generates attack_vectors + special_instructions
 
+        For the enumeration phase, pre-fetches technology-specific attack knowledge
+        from RAG (cve_database, exploitdb, nuclei_templates, hacktricks) and
+        synthesizes a prioritized attack briefing via get_rag_context and
+        get_phase_rag_context LLM reasoning. Uses cve_context from RAG collections.
+
         Uses medium complexity (1024 token budget) for the LLM synthesis step.
         """
         # ── Layer 1: Mission state ────────────────────────────────────────────
@@ -604,6 +609,10 @@ class OrchestratorAgent(BaseAgent):
             k: v.get("result", {})
             for k, v in list(self.phase_results.items())[-2:]
         }
+
+        # ── Enumeration-specific intelligent briefing ─────────────────────────
+        if phase_name == "enumeration":
+            return self._build_enumeration_briefing(hosts_summary, prev_results)
 
         # ── Layer 2: Phase-specific RAG context ───────────────────────────────
         rag_query = f"{phase_name} techniques {self.memory.target} exploitation"
@@ -660,6 +669,139 @@ class OrchestratorAgent(BaseAgent):
         if not result.get("tool_commands") and tool_examples:
             result["tool_commands"] = self._apply_placeholders(tool_examples[:3])
         return result
+
+    def _build_enumeration_briefing(
+        self, hosts_summary: dict, prev_results: dict
+    ) -> dict:
+        """
+        Enumeration-phase briefing with technology-specific RAG pre-fetch.
+
+        Reads what ReconAgent wrote to MissionMemory.
+        For each discovered technology, queries RAG to find relevant
+        attack knowledge — not to tell EnumVulnAgent what to find,
+        but to give it a head start with domain knowledge.
+        """
+        state = self.memory.state
+        action_log = state.get("action_log", [])
+
+        tech_findings = [
+            a.get("result", "")
+            for a in action_log
+            if "technology" in str(a.get("action", "")).lower()
+            and a.get("result")
+        ]
+
+        technology_intelligence = []
+        for tech_str in tech_findings[:8]:
+            tech_intel = {
+                "technology": tech_str,
+                "cve_context": "",
+                "exploit_context": "",
+                "technique_context": "",
+            }
+
+            try:
+                cve_hits = self.chroma.get_phase_rag_context(
+                    phase="enumeration",
+                    query=f"{tech_str} CVE vulnerability exploit",
+                    n=2,
+                )
+                tech_intel["cve_context"] = self._format_rag_compact(
+                    cve_hits, max_chars=200
+                )
+            except Exception:
+                pass
+
+            try:
+                exploit_hits = self.chroma.get_rag_context(
+                    f"{tech_str} exploit",
+                    collections=["exploitdb", "nuclei_templates"],
+                    n=2,
+                )
+                tech_intel["exploit_context"] = self._format_rag_compact(
+                    exploit_hits, max_chars=150
+                )
+            except Exception:
+                pass
+
+            try:
+                technique_hits = self.chroma.get_rag_context(
+                    f"{tech_str} pentest attack technique",
+                    collections=["hacktricks"],
+                    n=1,
+                )
+                tech_intel["technique_context"] = self._format_rag_compact(
+                    technique_hits, max_chars=150
+                )
+            except Exception:
+                pass
+
+            technology_intelligence.append(tech_intel)
+
+        synthesis_prompt = f"""You are preparing an attack briefing for
+the EnumerationAgent. You have pre-fetched knowledge base data
+about technologies discovered during passive reconnaissance.
+
+Target: {self.memory.target}
+Mission state summary: {self.memory.get_full_context()[:300]}
+
+Discovered technologies with knowledge base context:
+{json.dumps(technology_intelligence, indent=2, default=str)[:1500]}
+
+Your task:
+Read the knowledge base data above. Reason about:
+  1. Which technologies represent the highest attack priority
+     based on what the knowledge base says about them?
+  2. What attack approaches does the knowledge base suggest
+     for each technology?
+  3. What entry points should enumeration focus on first?
+  4. What MITRE techniques are most applicable?
+
+Synthesize this into an actionable briefing for EnumerationAgent.
+Do not invent CVEs or exploits — only reference what appears
+in the knowledge base data provided above.
+
+Return JSON:
+{{
+  "attack_priorities": [],
+  "technology_briefings": [
+    {{
+      "technology": "from evidence",
+      "attack_approach": "derived from knowledge base",
+      "entry_points": [],
+      "mitre_techniques": []
+    }}
+  ],
+  "rag_context": "key knowledge base findings",
+  "enumeration_focus": "where to start and why"
+}}"""
+
+        briefing_data = self._direct_llm(
+            synthesis_prompt,
+            task_complexity="medium",
+        )
+
+        if not briefing_data or "error" in briefing_data:
+            return {
+                "technology_intelligence": technology_intelligence,
+                "attack_priorities": [],
+                "enumeration_focus": "full service enumeration",
+            }
+
+        # Merge technology_intelligence for downstream use
+        briefing_data["technology_intelligence"] = technology_intelligence
+        return briefing_data
+
+    def _format_rag_compact(
+        self, results: list, max_chars: int = 200
+    ) -> str:
+        """Compact RAG formatting — one-line per hit, pipe-separated."""
+        if not results:
+            return ""
+        return " | ".join(
+            str(r.get("text", ""))[:80].replace("\n", " ")
+            for r in results[:3]
+        )[:max_chars]
 
     def _analyze_phase_result(self, phase: str, result: dict) -> dict:
         """
