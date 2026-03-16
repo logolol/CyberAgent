@@ -144,6 +144,23 @@ class OrchestratorAgent(BaseAgent):
         # Lazy-init: MCP + external intel loaded only when first needed
         self._mcp = None
         self._external_intel = None
+        # Accumulated mission intelligence — grows with each completed phase
+        # and is forwarded precisely to each subsequent specialist agent.
+        self.mission_intelligence: dict = {
+            "phases_completed": [],
+            "confirmed_hosts": [],
+            "confirmed_services": {},
+            "confirmed_vulns": [],
+            "exploitable_vulns": [],
+            "critical_path": {},
+            "all_attack_vectors": [],
+            "security_controls": {},
+            "mitre_chain": [],
+            "exploitation_guidance": "",
+            "shells_obtained": [],
+            "credentials_found": [],
+            "loot": [],
+        }
 
     def _get_mcp(self):
         """Lazy-load MCP PentestAI wrapper (one instance per orchestrator)."""
@@ -166,6 +183,129 @@ class OrchestratorAgent(BaseAgent):
                 self.log_warning(f"ExternalIntel init failed: {e}")
                 self._external_intel = None
         return self._external_intel
+
+    def _accumulate_phase_intelligence(
+        self,
+        phase: str,
+        phase_result: dict,
+    ) -> None:
+        """
+        Reads what each specialist agent returned and accumulates
+        it into a growing mission intelligence picture.
+
+        This is the MEMORY of the entire mission — each phase adds
+        to it and the Orchestrator uses it to brief the next agent.
+
+        The LLM synthesizes what changed and what it means.
+        Never overwrites — always accumulates.
+        """
+        result = phase_result.get("result", {})
+        if not isinstance(result, dict):
+            return
+
+        # Mark phase complete
+        self.mission_intelligence["phases_completed"].append(phase)
+
+        # Accumulate hosts
+        hosts_found = result.get("hosts", []) or result.get("hosts_found", [])
+        if isinstance(hosts_found, list):
+            for h in hosts_found:
+                if h and h not in self.mission_intelligence["confirmed_hosts"]:
+                    self.mission_intelligence["confirmed_hosts"].append(h)
+
+        # Accumulate services (from enumeration)
+        if phase == "enumeration":
+            services = result.get("services", {})
+            if isinstance(services, dict):
+                self.mission_intelligence["confirmed_services"].update(services)
+
+            # Forward critical path directly — this is gold
+            cp = result.get("critical_path", {})
+            if isinstance(cp, dict) and cp:
+                self.mission_intelligence["critical_path"] = cp
+
+            # Forward all attack vectors
+            av = result.get("all_attack_vectors", [])
+            if isinstance(av, list) and av:
+                self.mission_intelligence["all_attack_vectors"] = av
+
+            # Forward security controls
+            sc = result.get("security_controls", {})
+            if isinstance(sc, dict):
+                self.mission_intelligence["security_controls"] = sc
+
+            # Forward exploitation guidance
+            eg = result.get("exploitation_guidance", "")
+            if eg:
+                self.mission_intelligence["exploitation_guidance"] = eg
+
+            # Accumulate confirmed exploitable vulns
+            vulns = result.get("vulnerabilities", [])
+            if isinstance(vulns, list):
+                for v in vulns:
+                    if isinstance(v, dict) and v.get("exploitable"):
+                        if v not in self.mission_intelligence["exploitable_vulns"]:
+                            self.mission_intelligence["exploitable_vulns"].append(v)
+                self.mission_intelligence["confirmed_vulns"] = vulns
+
+        # Accumulate MITRE chain across all phases
+        mitre = result.get("mitre_attack_chain", [])
+        if isinstance(mitre, list):
+            for t in mitre:
+                if t and t not in self.mission_intelligence["mitre_chain"]:
+                    self.mission_intelligence["mitre_chain"].append(t)
+
+        # Accumulate shells (from exploitation) — deduplicate by (type, user, path)
+        if phase == "exploitation":
+            shells = result.get("shells_obtained", [])
+            if isinstance(shells, list):
+                existing = self.mission_intelligence["shells_obtained"]
+                for s in shells:
+                    if s and s not in existing:
+                        existing.append(s)
+
+        # Accumulate credentials and loot (from post-exploit) — deduplicate
+        if phase in ["exploitation", "postexploit"]:
+            creds = result.get("credentials_found", [])
+            if isinstance(creds, list):
+                existing_creds = self.mission_intelligence["credentials_found"]
+                for c in creds:
+                    if c and c not in existing_creds:
+                        existing_creds.append(c)
+            loot = result.get("loot", [])
+            if isinstance(loot, list):
+                existing_loot = self.mission_intelligence["loot"]
+                for item in loot:
+                    if item and item not in existing_loot:
+                        existing_loot.append(item)
+
+        # Store accumulated intelligence in ChromaDB mission collection
+        # so all agents can query it semantically
+        try:
+            self.chroma.store_mission_finding(
+                mission_id=self.memory.mission_id,
+                agent="OrchestratorAgent",
+                finding=json.dumps(self.mission_intelligence, default=str),
+                metadata={
+                    "type": "mission_intelligence_snapshot",
+                    "phase_completed": phase,
+                    "exploitable_count": len(
+                        self.mission_intelligence["exploitable_vulns"]
+                    ),
+                },
+            )
+        except Exception as e:
+            self.log_warning(f"Mission intelligence ChromaDB store failed: {e}")
+
+        # Log accumulated state to MissionMemory
+        self.memory.log_action(
+            "OrchestratorAgent",
+            f"intelligence_accumulated_{phase}",
+            f"exploitable={len(self.mission_intelligence['exploitable_vulns'])} "
+            f"services={len(self.mission_intelligence['confirmed_services'])} "
+            f"mitre={len(self.mission_intelligence['mitre_chain'])}",
+        )
+        self.memory.save_state()
 
     def _apply_placeholders(self, commands: list[str]) -> list[str]:
         """
@@ -483,6 +623,9 @@ class OrchestratorAgent(BaseAgent):
                 result = {"success": False, "error": str(e)}
                 self.phase_results[phase_name] = result
 
+            # Accumulate intelligence from this phase before briefing the next
+            self._accumulate_phase_intelligence(phase_name, result)
+
             # Post-phase analysis
             analysis = self._analyze_phase_result(phase_name, result)
 
@@ -578,26 +721,9 @@ class OrchestratorAgent(BaseAgent):
         passed, reason = gates[phase_name]()
         return passed, reason
 
-    def _build_agent_briefing(self, phase_name: str) -> dict:
-        """
-        Compose a targeted briefing for the next specialist agent.
-
-        Injects four layers of context to prevent hallucination and ensure the
-        specialist has everything it needs to act without guessing:
-          1. Mission state  — live hosts, open ports, known vulns from MissionMemory
-          2. RAG context    — top-ranked knowledge base hits for this phase + target
-          3. Tool examples  — concrete CLI commands the specialist should prefer
-          4. LLM synthesis  — DeepSeek-R1 generates attack_vectors + special_instructions
-
-        For the enumeration phase, pre-fetches technology-specific attack knowledge
-        from RAG (cve_database, exploitdb, nuclei_templates, hacktricks) and
-        synthesizes a prioritized attack briefing via get_rag_context and
-        get_phase_rag_context LLM reasoning. Uses cve_context from RAG collections.
-
-        Uses medium complexity (1024 token budget) for the LLM synthesis step.
-        """
-        # ── Layer 1: Mission state ────────────────────────────────────────────
-        hosts_summary = {
+    def _get_hosts_summary(self) -> dict:
+        """Compact host summary from MissionMemory for LLM prompts."""
+        return {
             ip: {
                 "ports": len(h.get("ports", [])),
                 "vulns": len(h.get("vulnerabilities", [])),
@@ -605,17 +731,218 @@ class OrchestratorAgent(BaseAgent):
             }
             for ip, h in self.memory._state.get("hosts", {}).items()
         }
-        prev_results = {
-            k: v.get("result", {})
-            for k, v in list(self.phase_results.items())[-2:]
-        }
 
-        # ── Enumeration-specific intelligent briefing ─────────────────────────
+    def _build_agent_briefing(self, phase_name: str) -> dict:
+        """
+        Builds a phase-specific briefing using the accumulated
+        mission intelligence from all previous phases.
+
+        Each phase gets exactly what it needs from what was found —
+        not a generic briefing, a targeted intelligence package.
+
+        For recon: minimal briefing (nothing known yet).
+        For enumeration: inject recon technology findings.
+        For exploitation: inject critical_path + attack vectors from enum.
+        For privesc: inject shells obtained from exploitation.
+        For postexploit: inject privesc paths.
+        For reporting: inject full mission intelligence chain.
+        """
+        intel = self.mission_intelligence
+
+        # ── Phase-specific intelligence extraction ─────────────────────────────
+
         if phase_name == "enumeration":
+            # Enumeration needs: what recon found + pre-fetched CVE context
+            hosts_summary = self._get_hosts_summary()
+            prev_results = {
+                k: v.get("result", {})
+                for k, v in list(self.phase_results.items())[-2:]
+            }
             return self._build_enumeration_briefing(hosts_summary, prev_results)
 
-        # ── Layer 2: Phase-specific RAG context ───────────────────────────────
+        if phase_name == "exploitation":
+            # Exploitation needs: critical_path + all_attack_vectors
+            # This is where the intelligence chain pays off
+
+            # Pre-fetch exploit context for the critical path
+            exploit_rag = ""
+            cp = intel.get("critical_path", {})
+            if cp:
+                cve = cp.get("cve", "")
+                service = cp.get("service", "")
+                try:
+                    hits = self.chroma.get_rag_context(
+                        f"{cve} {service} exploit payload attack",
+                        collections=["exploitdb", "payloads", "hacktricks"],
+                        n=3,
+                    )
+                    exploit_rag = "\n".join(
+                        h.get("text", "")[:200] for h in hits
+                    )
+                except Exception:
+                    pass
+
+            # Ask LLM to synthesize an exploitation briefing
+            # from the accumulated intelligence
+            prompt = f"""You are preparing an exploitation briefing.
+All previous enumeration and vulnerability analysis is complete.
+
+Target: {self.memory.target}
+
+Confirmed exploitable vulnerabilities:
+{json.dumps(intel.get('exploitable_vulns', [])[:5], default=str, indent=2)[:800]}
+
+Critical attack path identified by analysis:
+{json.dumps(intel.get('critical_path', {}), default=str, indent=2)[:400]}
+
+All attack vectors ranked by priority:
+{json.dumps(intel.get('all_attack_vectors', [])[:6], default=str, indent=2)[:400]}
+
+Security controls status:
+{json.dumps(intel.get('security_controls', {}), default=str)[:200]}
+
+Exploitation guidance from analysis:
+{intel.get('exploitation_guidance', 'proceed with highest confidence vector')[:300]}
+
+Exploit knowledge base context:
+{exploit_rag[:400] if exploit_rag else 'query exploitdb for specific CVEs'}
+
+MITRE techniques applicable: {intel.get('mitre_chain', [])[:8]}
+
+Synthesize an exploitation briefing. Tell the agent:
+1. What to attempt first and why (evidence-based)
+2. What fallback vectors exist if first fails
+3. Whether evasion is needed based on security controls
+4. What success looks like (shell as which user)
+5. What to avoid based on what was tried
+
+Do not invent attack paths. Only use what the evidence shows.
+
+Return JSON:
+{{
+  "primary_target": {{
+    "service": "from evidence",
+    "port": 0,
+    "attack_vector": "from evidence",
+    "tool_approach": "derived from knowledge base",
+    "expected_outcome": "derived from CVE analysis"
+  }},
+  "fallback_vectors": [],
+  "evasion_needed": false,
+  "evasion_approach": "null or derived from security controls",
+  "avoid": [],
+  "success_criteria": "derived from vulnerability analysis",
+  "mitre_entry_points": []
+}}"""
+
+            result = self._direct_llm(prompt, task_complexity="high")
+
+            if "error" not in result:
+                result["mission_intelligence"] = intel
+                result["confirmed_vulns"] = intel.get("exploitable_vulns", [])
+                return result
+
+            # Fallback: pass raw intelligence without LLM synthesis
+            # Evasion is needed if any active security control is detected
+            sc = intel.get("security_controls", {})
+            evasion_needed = any(
+                v not in [None, "", "none_detected", False]
+                for v in sc.values()
+            ) if isinstance(sc, dict) else False
+            return {
+                "primary_target": intel.get("critical_path", {}),
+                "fallback_vectors": intel.get("all_attack_vectors", []),
+                "evasion_needed": evasion_needed,
+                "confirmed_vulns": intel.get("exploitable_vulns", []),
+                "mission_intelligence": intel,
+            }
+
+        if phase_name == "privesc":
+            # PrivEsc needs: what shell we have + what privesc intelligence says
+            shells = intel.get("shells_obtained", [])
+
+            privesc_rag = ""
+            try:
+                hits = self.chroma.get_phase_rag_context(
+                    phase="privesc",
+                    query=f"linux privilege escalation {self.memory.target}",
+                    n=3,
+                )
+                privesc_rag = "\n".join(h.get("text", "")[:200] for h in hits)
+            except Exception:
+                pass
+
+            prompt = f"""Preparing privilege escalation briefing.
+
+Target: {self.memory.target}
+Shells obtained: {json.dumps(shells, default=str)[:300]}
+Current confirmed services: {json.dumps(intel.get('confirmed_services', {}))[:200]}
+
+Privilege escalation knowledge:
+{privesc_rag[:400]}
+
+MITRE chain so far: {intel.get('mitre_chain', [])[:8]}
+
+Based on the shell access and target environment, determine:
+1. Most likely privesc vectors for this Linux target
+2. What information to gather first
+3. What tools to run
+
+Return JSON:
+{{
+  "current_access": "derived from shells data",
+  "priority_vectors": [],
+  "initial_recon_commands": "derived from privesc knowledge",
+  "target_user": "root",
+  "mitre_techniques": []
+}}"""
+
+            result = self._direct_llm(prompt, task_complexity="medium")
+            if "error" not in result:
+                result["shells"] = shells
+                result["mission_intelligence"] = intel
+                return result
+
+            return {
+                "shells": shells,
+                "mission_intelligence": intel,
+                # Linux-specific fallback vectors — LLM synthesis above handles
+                # platform-aware selection when available
+                "priority_vectors": ["SUID", "sudo -l", "cron", "kernel exploit"],
+            }
+
+        if phase_name == "postexploit":
+            # PostExploit needs: root access confirmed + what to collect
+            return {
+                "shells": intel.get("shells_obtained", []),
+                "credentials": intel.get("credentials_found", []),
+                "mission_intelligence": intel,
+                "collection_priorities": [
+                    "password hashes", "ssh keys", "config files",
+                    "network neighbors", "running services", "cron jobs",
+                ],
+            }
+
+        if phase_name == "reporting":
+            # Reporting needs the complete mission picture
+            return {
+                "mission_intelligence": intel,
+                "mitre_chain": intel.get("mitre_chain", []),
+                "confirmed_vulns": intel.get("confirmed_vulns", []),
+                "exploitable": intel.get("exploitable_vulns", []),
+                "shells": intel.get("shells_obtained", []),
+                "credentials": intel.get("credentials_found", []),
+                "phases_completed": intel.get("phases_completed", []),
+            }
+
+        # Generic fallback for recon and any unspecified phase
+        # (recon uses this — minimal needed, nothing known yet)
+        hosts_summary = self._get_hosts_summary()
+        tool_examples = _PHASE_TOOL_EXAMPLES.get(phase_name, [])
+        tool_block = "\n".join(self._apply_placeholders(tool_examples))
+
         rag_query = f"{phase_name} techniques {self.memory.target} exploitation"
+        rag_snippets: list[str] = []
         try:
             mm_phase = self._PHASE_MAP.get(phase_name, phase_name)
             rag_hits = self.chroma.get_phase_rag_context(mm_phase, rag_query, n=5)
@@ -625,14 +952,12 @@ class OrchestratorAgent(BaseAgent):
             ]
         except Exception as e:
             self.log_warning(f"RAG context for briefing failed: {e}")
-            rag_snippets = []
 
-        # ── Layer 3: Concrete tool command examples ───────────────────────────
-        tool_examples = _PHASE_TOOL_EXAMPLES.get(phase_name, [])
-        tool_block = "\n".join(self._apply_placeholders(tool_examples))
-
-        # ── Layer 4: LLM synthesis (DeepSeek-R1) ─────────────────────────────
         rag_block = "\n".join(rag_snippets) or "No RAG hits — rely on known techniques."
+        prev_results = {
+            k: v.get("result", {})
+            for k, v in list(self.phase_results.items())[-2:]
+        }
         prompt = (
             f"Generate a pentest briefing for the '{phase_name}' agent.\n"
             f"Target: {self.memory.target}\n"
@@ -654,7 +979,6 @@ class OrchestratorAgent(BaseAgent):
 
         result = self._direct_llm(prompt, task_complexity="medium")
         if "error" in result:
-            # Graceful fallback — provide useful defaults without LLM
             return {
                 "priority_targets": list(hosts_summary.keys()) or [self.memory.target],
                 "known_info": hosts_summary,
@@ -663,11 +987,12 @@ class OrchestratorAgent(BaseAgent):
                 "rag_queries": [f"{phase_name} {self.memory.target}", "CVE exploits"],
                 "tool_commands": self._apply_placeholders(tool_examples[:3]),
                 "special_instructions": f"Focus on {phase_name} for {self.memory.target}.",
+                "mission_intelligence": intel,
             }
 
-        # Inject tool commands into result even if LLM omitted them
         if not result.get("tool_commands") and tool_examples:
             result["tool_commands"] = self._apply_placeholders(tool_examples[:3])
+        result["mission_intelligence"] = intel
         return result
 
     def _build_enumeration_briefing(
