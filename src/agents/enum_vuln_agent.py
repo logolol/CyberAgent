@@ -113,6 +113,13 @@ class EnumVulnAgent(BaseAgent):
         self.done = False
         self.briefing: dict[str, Any] = {}
         self._completed_tools: set[str] = set()
+        self._firewall_detected: bool = False
+
+        # Warm the model NOW — before any agent logic runs
+        # This ensures subsequent LLM calls find model already in RAM
+        from utils.llm_factory import warm_model
+        self.log_info("Pre-warming Qwen2.5:14b for enumeration...")
+        warm_model(role="default")
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -270,8 +277,13 @@ class EnumVulnAgent(BaseAgent):
             self.all_results.update(wave1_results)
             self.log_success(f"Wave 1 complete: {len(wave1_results)} result(s)")
 
-        # Wave 2: service-focused probing from parsed open ports.
-        wave2_specs = self._build_wave2_from_ports()
+        # Wave 2: LLM-driven service probing based on discovered ports.
+        port_services = self._extract_port_services()
+        if port_services:
+            self.log_info("Asking LLM+RAG what to enumerate next...")
+            wave2_specs = self._decide_wave2_with_llm(port_services)
+        else:
+            wave2_specs = []
         if wave2_specs:
             wave2_results = self._run_tool_batch(wave2_specs)
             self.all_results.update(wave2_results)
@@ -359,6 +371,176 @@ class EnumVulnAgent(BaseAgent):
 
         return specs[: self.MAX_CONCURRENT]
 
+    def _extract_port_services(self) -> dict[int, str]:
+        """Extracts {port: service} from all results. No LLM."""
+        port_services: dict[int, str] = {}
+        for output in self.all_results.values():
+            for m in re.finditer(
+                r"(\d+)/tcp\s+open\s+(\S+)", str(output)
+            ):
+                try:
+                    port = int(m.group(1))
+                except Exception:
+                    continue
+                if 1 <= port <= 65535:
+                    port_services[port] = m.group(2).lower()
+        return port_services
+
+    def _decide_wave2_with_llm(
+        self, port_services: dict[int, str]
+    ) -> list[dict[str, Any]]:
+        """
+        LLM analyzes nmap output and decides what to probe next.
+        Model is warm — this will complete in ~30-60s not timeout.
+        RAG injected for deep knowledge.
+        MITRE ATT&CK guides technique selection.
+        Falls back to _build_wave2_from_ports() if LLM unavailable.
+        """
+        import os
+
+        # Get nmap output summary
+        nmap_summary = ""
+        for key, output in self.all_results.items():
+            if "nmap" in key.lower() or "discover" in key.lower():
+                nmap_summary += str(output)[:1500]
+                break
+
+        # RAG: enumeration techniques for discovered services
+        services_str = " ".join(set(port_services.values()))
+        rag_enum = ""
+        try:
+            results = self.chroma.get_phase_rag_context(
+                phase="enumeration",
+                query=f"enumerate {services_str} linux pentest techniques",
+                n=3,
+            )
+            rag_enum = "\n".join(
+                r.get("text", "")[:200] for r in results
+            )
+        except Exception:
+            pass
+
+        # RAG: CVEs for discovered services
+        rag_cve = ""
+        try:
+            for svc in list(set(port_services.values()))[:3]:
+                results = self.chroma.get_rag_context(
+                    f"{svc} vulnerability exploit CVE linux",
+                    collections=["cve_database", "exploitdb"],
+                    n=2,
+                )
+                for r in results[:1]:
+                    rag_cve += r.get("text", "")[:200] + "\n"
+        except Exception:
+            pass
+
+        # MITRE ATT&CK TA0007 Discovery techniques
+        rag_mitre = ""
+        try:
+            results = self.chroma.get_rag_context(
+                "MITRE ATT&CK TA0007 discovery enumeration T1046 T1135 T1049",
+                collections=["mitre_attack"],
+                n=2,
+            )
+            rag_mitre = "\n".join(r.get("text", "")[:150] for r in results)
+        except Exception:
+            pass
+
+        # Available tools — instant check, no LLM
+        available: list[str] = []
+        check_tools = [
+            "nmap", "nikto", "gobuster", "ffuf", "dirb", "enum4linux",
+            "smbclient", "smbmap", "hydra", "nuclei", "sqlmap",
+            "svmap", "svwar", "smtp-user-enum", "snmpwalk", "redis-cli",
+            "ldapsearch", "wfuzz", "whatweb", "curl", "netcat", "telnet",
+            "ftp", "ssh", "mysql", "psql", "rpcinfo", "showmount",
+        ]
+        for tool in check_tools:
+            path = self.tools.find(tool)
+            if path and os.access(path, os.X_OK):
+                available.append(tool)
+
+        firewall = getattr(self, "_firewall_detected", False)
+
+        prompt = f"""You are a senior penetration tester.
+You just ran nmap on a Linux target and got these results:
+
+{nmap_summary[:800]}
+
+Open ports and services: {dict(list(port_services.items())[:15])}
+Firewall/filtering detected: {firewall}
+
+Knowledge base techniques:
+{rag_enum[:300] if rag_enum else 'use standard enum techniques'}
+
+Known CVEs for these services:
+{rag_cve[:300] if rag_cve else 'check service versions manually'}
+
+MITRE ATT&CK context:
+{rag_mitre[:200] if rag_mitre else 'T1046 T1135 T1049 applicable'}
+
+Available tools on this system: {available[:20]}
+
+{"FIREWALL DETECTED: use evasion — slow timing, fragmentation, decoys, source port 53/80/443" if firewall else "No firewall — use aggressive scanning"}
+
+Select the best tools to enumerate the discovered services.
+Prioritize: services most likely to have vulnerabilities.
+Consider: default credentials, version exploits, misconfigs.
+Tag the MITRE technique for each action.
+
+Return JSON only:
+{{
+  "reasoning": "what I see and why I chose these tools",
+  "mitre_techniques": ["T1046", "T1135"],
+  "tool_batch": [
+    {{
+      "tool": "enum4linux",
+      "purpose": "enumerate SMB shares and users",
+      "args": ["-a", "{self.target}"],
+      "timeout": 60,
+      "mitre": "T1135"
+    }}
+  ]
+}}
+
+Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
+
+        raw = self._llm_with_timeout(prompt, timeout=90)
+        decision = self._extract_json_robust(raw)
+
+        if not decision or not decision.get("tool_batch"):
+            self.log_warning("LLM wave decision failed — using port-based fallback")
+            return self._build_wave2_from_ports()
+
+        # Log reasoning and MITRE
+        if decision.get("reasoning"):
+            self.log_info(f"🧠 {decision['reasoning'][:150]}")
+
+        for technique in decision.get("mitre_techniques", []):
+            if technique:
+                self.memory.log_action(
+                    "EnumVulnAgent", "mitre_technique", str(technique)
+                )
+
+        # Build specs from LLM decision
+        specs: list[dict[str, Any]] = []
+        for spec in decision.get("tool_batch", []):
+            tool = str(spec.get("tool", "")).strip()
+            path = self.tools.find(tool)
+            if path and os.access(path, os.X_OK):
+                specs.append({
+                    "tool_hint": tool,
+                    "purpose": spec.get("purpose", f"enumerate {tool}"),
+                    "_resolved_args": [str(a) for a in spec.get("args", [self.target])],
+                    "_timeout": int(spec.get("timeout", 60)),
+                })
+
+        if not specs:
+            self.log_warning("LLM selected no available tools — using port-based fallback")
+            return self._build_wave2_from_ports()
+
+        return specs[: self.MAX_CONCURRENT]
+
     def _build_wave3_vuln_scan(self) -> list[dict[str, Any]]:
         """
         Build vulnerability-focused specs from available scanners.
@@ -392,60 +574,114 @@ class EnumVulnAgent(BaseAgent):
 
     def _run_analysis_phase(self) -> dict[str, Any]:
         """
-        Run one LLM analysis over all gathered outputs.
+        Run one LLM analysis over all gathered outputs using all relevant RAG collections.
         Falls back to regex+RAG-only analysis if LLM is unavailable.
         """
         summary = self._build_full_output_summary()
         versions = self._extract_versions_from_all_outputs()
+        version_query = " ".join(
+            f"{k} {v}" for k, v in list(versions.items())[:5]
+        )
 
-        cve_lines: list[str] = []
-        for service, version in list(versions.items())[:3]:
-            try:
-                hits = self.chroma.get_rag_context(
-                    f"{service} {version} CVE vulnerability exploit",
-                    collections=["cve_database", "exploitdb"],
-                    n=2,
-                )
-                for hit in hits[:1]:
-                    snippet = str(hit.get("text", "")).replace("\n", " ")[:200]
-                    if snippet:
-                        cve_lines.append(snippet)
-            except Exception as e:
-                self.log_warning(f"CVE lookup failed for '{service} {version}': {e}")
-        cve_context = "\n".join(cve_lines)[:500]
+        # Query CVE database
+        cve_context = ""
+        try:
+            results = self.chroma.get_rag_context(
+                f"{version_query} CVE vulnerability",
+                collections=["cve_database"],
+                n=4,
+            )
+            cve_context = "\n".join(
+                r.get("text", "")[:250] for r in results
+            )
+        except Exception as e:
+            self.log_warning(f"CVE RAG lookup failed during analysis: {e}")
 
+        # Query Exploit-DB
+        exploit_context = ""
+        try:
+            results = self.chroma.get_rag_context(
+                f"{version_query} exploit",
+                collections=["exploitdb"],
+                n=3,
+            )
+            exploit_context = "\n".join(
+                r.get("text", "")[:200] for r in results
+            )
+        except Exception as e:
+            self.log_warning(f"ExploitDB RAG lookup failed during analysis: {e}")
+
+        # Query MITRE ATT&CK
         mitre_context = ""
         try:
-            mitre_hits = self.chroma.get_rag_context(
-                "MITRE ATT&CK exploit public-facing service and vulnerability scanning",
+            results = self.chroma.get_rag_context(
+                "MITRE ATT&CK T1190 T1110 T1083 T1135 exploit vulnerability",
                 collections=["mitre_attack"],
-                n=1,
+                n=3,
             )
-            if mitre_hits:
-                mitre_context = str(mitre_hits[0].get("text", "")).replace("\n", " ")[:150]
+            mitre_context = "\n".join(
+                r.get("text", "")[:150] for r in results
+            )
         except Exception as e:
-            self.log_warning(f"MITRE lookup failed during analysis phase: {e}")
+            self.log_warning(f"MITRE RAG lookup failed during analysis: {e}")
+
+        # Query HackTricks
+        hacktricks_context = ""
+        try:
+            results = self.chroma.get_rag_context(
+                f"{version_query} pentest attack",
+                collections=["hacktricks"],
+                n=2,
+            )
+            hacktricks_context = "\n".join(
+                r.get("text", "")[:200] for r in results
+            )
+        except Exception as e:
+            self.log_warning(f"HackTricks RAG lookup failed during analysis: {e}")
+
+        # Query Nuclei templates
+        nuclei_context = ""
+        try:
+            results = self.chroma.get_rag_context(
+                version_query or "web vulnerability misconfiguration",
+                collections=["nuclei_templates"],
+                n=2,
+            )
+            nuclei_context = "\n".join(
+                r.get("text", "")[:150] for r in results
+            )
+        except Exception as e:
+            self.log_warning(f"Nuclei RAG lookup failed during analysis: {e}")
 
         prompt = (
-            f"Authorized pentest analysis for target: {self.target}\n\n"
-            f"Tool output summary:\n{summary}\n\n"
-            f"CVE context:\n{cve_context if cve_context else 'none'}\n\n"
-            f"MITRE context:\n{mitre_context if mitre_context else 'none'}\n\n"
-            "Extract all evidence-backed findings.\n"
-            "Return JSON only with this schema:\n"
+            f"Senior penetration tester final analysis.\n"
+            f"Target: {self.target} (Linux server, authorized pentest)\n\n"
+            f"Complete tool output summary:\n{summary}\n\n"
+            f"NVD CVE database matches:\n{cve_context[:500] if cve_context else 'no matches found'}\n\n"
+            f"Exploit-DB entries:\n{exploit_context[:400] if exploit_context else 'no matches found'}\n\n"
+            f"HackTricks techniques:\n{hacktricks_context[:300] if hacktricks_context else 'standard techniques'}\n\n"
+            f"Nuclei template matches:\n{nuclei_context[:200] if nuclei_context else 'standard templates'}\n\n"
+            f"MITRE ATT&CK context:\n{mitre_context[:250] if mitre_context else 'T1190 T1110 applicable'}\n\n"
+            "Analyze everything above. Be specific and accurate.\n"
+            "Only report confirmed findings with evidence from tool output.\n"
+            "Do not invent CVEs — use only those appearing in the CVE context.\n"
+            "Classify severity using CVSS scores from NVD data.\n\n"
+            "Return JSON only:\n"
             '{"ports":[{"port":80,"service":"http","version":"Apache 2.x","confidence":"high"}],'
             '"vulnerabilities":[{"title":"string","service":"string","cve":"CVE-YYYY-NNNN or CVE-UNKNOWN",'
             '"cvss_score":0.0,"severity":"critical|high|medium|low|info","confirmed":false,'
-            '"evidence":"string","exploitable":false,"mitre_technique":"T1190"}],'
-            '"misconfigurations":[{"type":"string","service":"string","detail":"string"}],'
-            '"risk_summary":"string","mitre_chain":["T1046","T1190"]}'
+            '"evidence":"string","exploitable":false,"exploit_reference":"EDB-XXXXX or null",'
+            '"mitre_technique":"T1190","remediation":"string"}],'
+            '"misconfigurations":[{"type":"string","service":"string","detail":"string","severity":"high"}],'
+            '"firewall_analysis":"detected or not",'
+            '"risk_summary":"string","attack_priority":"string","mitre_chain":["T1046","T1190"]}'
         )
 
-        self.log_info("Analyzing all gathered outputs with one LLM call...")
-        raw = self._llm_with_timeout(prompt, timeout=120)
+        self.log_info("Running final LLM+RAG vulnerability analysis...")
+        raw = self._llm_with_timeout(prompt, timeout=180)
         analysis = self._extract_json_robust(raw)
         if isinstance(analysis, dict):
-            self.log_success("Analysis phase complete")
+            self.log_success("LLM analysis complete with RAG grounding")
             return analysis
 
         self.log_warning("Analysis LLM unavailable/unparseable — using regex analysis fallback")
