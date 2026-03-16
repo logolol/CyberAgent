@@ -964,11 +964,27 @@ Return JSON:
         except Exception as e:
             self.log_warning(f"Enumeration RAG lookup failed: {e}")
 
+        # Query mission collection for intelligence from previous phases
+        mission_rag = ""
+        try:
+            mission_hits = self.chroma.get_mission_context(
+                mission_id=self.memory.mission_id,
+                query=f"enumeration attack vectors {self.target}",
+                n=5,
+            )
+            if mission_hits:
+                mission_rag = "\n".join(
+                    h.get("text", "")[:150] for h in mission_hits[:3]
+                )
+        except Exception:
+            pass
+
         prompt = (
             f"Pentester planning active enumeration of Linux server.\n"
             f"Target: {self.target}\n"
             f"Known from recon: {tech_findings}; {recon_summary}\n"
             f"RAG context: {rag_hint[:150] if rag_hint else 'none'}\n"
+            f"Intelligence from previous phases:\n{mission_rag[:300]}\n"
             "What are the 3 highest-priority attack vectors to enumerate?\n"
             "Consider open services, likely vulnerabilities, and MITRE TA0007.\n"
             "JSON only:\n"
