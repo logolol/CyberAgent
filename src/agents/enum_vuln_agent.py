@@ -114,6 +114,8 @@ class EnumVulnAgent(BaseAgent):
         self.briefing: dict[str, Any] = {}
         self._completed_tools: set[str] = set()
         self._firewall_detected: bool = False
+        self.intelligence_log: list[dict[str, Any]] = []
+        self._security_controls: dict[str, Any] = {}
 
         # Warm the model NOW — before any agent logic runs
         # This ensures subsequent LLM calls find model already in RAM
@@ -276,6 +278,10 @@ class EnumVulnAgent(BaseAgent):
             wave1_results = self._run_tool_batch(wave1_specs)
             self.all_results.update(wave1_results)
             self.log_success(f"Wave 1 complete: {len(wave1_results)} result(s)")
+            self._update_intelligence_log(1, wave1_results, {})
+
+        # Security control analysis: reason about wave 1 outputs before wave 2
+        self._analyze_security_controls()
 
         # Wave 2: LLM-driven service probing based on discovered ports.
         port_services = self._extract_port_services()
@@ -288,6 +294,7 @@ class EnumVulnAgent(BaseAgent):
             wave2_results = self._run_tool_batch(wave2_specs)
             self.all_results.update(wave2_results)
             self.log_success(f"Wave 2 complete: {len(wave2_results)} result(s)")
+            self._update_intelligence_log(2, wave2_results, {})
         else:
             self.log_info("Wave 2 skipped: no service probing specs generated")
 
@@ -297,10 +304,172 @@ class EnumVulnAgent(BaseAgent):
             wave3_results = self._run_tool_batch(wave3_specs)
             self.all_results.update(wave3_results)
             self.log_success(f"Wave 3 complete: {len(wave3_results)} result(s)")
+            self._update_intelligence_log(3, wave3_results, {})
         else:
             self.log_info("Wave 3 skipped: no vulnerability scanning tools available")
 
         self.log_success(f"Gather phase complete: {len(self.all_results)} total tool output(s)")
+
+    def _analyze_security_controls(self) -> dict:
+        """
+        Analyzes wave 1 tool outputs to detect security controls.
+
+        The LLM reads real tool output and reasons about:
+          - What patterns in the output suggest filtering or blocking?
+          - What inconsistencies suggest stateful inspection?
+          - What response behaviors suggest active monitoring?
+          - What anomalies suggest honeypots or deception?
+
+        The LLM then queries its own reasoning + RAG to determine:
+          - What evasion techniques are appropriate?
+          - What scanning adjustments should wave 2 make?
+          - What MITRE techniques cover this situation?
+
+        Never assumes what controls exist — derives from evidence only.
+        """
+        raw_evidence = self._build_full_output_summary()
+
+        detection_context = ""
+        evasion_context = ""
+        mitre_context = ""
+
+        try:
+            observed_patterns = self._extract_anomaly_patterns()
+
+            detection_context = self._format_rag(
+                self.chroma.get_rag_context(
+                    f"linux firewall detection {observed_patterns} "
+                    f"IDS IPS evasion scanning techniques",
+                    collections=["hacktricks", "mitre_attack"],
+                    n=3,
+                ),
+                max_chars=400,
+            )
+
+            evasion_context = self._format_rag(
+                self.chroma.get_rag_context(
+                    f"firewall bypass evasion nmap techniques "
+                    f"packet fragmentation slow scan decoy",
+                    collections=["payloads", "hacktricks"],
+                    n=2,
+                ),
+                max_chars=300,
+            )
+
+            mitre_context = self._format_rag(
+                self.chroma.get_rag_context(
+                    "MITRE ATT&CK T1562 impair defenses "
+                    "T1027 obfuscation T1090 proxy evasion",
+                    collections=["mitre_attack"],
+                    n=2,
+                ),
+                max_chars=200,
+            )
+        except Exception as e:
+            self.log_warning(f"Security control RAG query failed: {e}")
+
+        prompt = f"""You are analyzing the output of active scanning tools
+against a Linux server. Your task is to reason about what the
+tool outputs reveal about security controls on the target.
+
+Raw tool output evidence:
+{raw_evidence[:800]}
+
+Security control detection methodology from knowledge base:
+{detection_context}
+
+Evasion technique references:
+{evasion_context}
+
+MITRE ATT&CK defensive evasion context:
+{mitre_context}
+
+Reasoning task:
+Read the tool outputs carefully. Look for patterns that reveal
+the presence or absence of security controls. Consider:
+  - Port response consistency (all open? some filtered? mixed?)
+  - Response timing patterns (uniform? variable? slowdown?)
+  - Unexpected closures or resets mid-scan
+  - HTTP response codes that suggest active filtering
+  - Absence of expected services that should be present
+
+Based ONLY on what the evidence shows, determine:
+1. What security controls appear to be present?
+2. How confident are you in each detection? What evidence supports it?
+3. What does this mean for our scanning strategy?
+4. What adjustments should we make to maximize discovery?
+5. Which MITRE techniques apply to this evasion scenario?
+
+Return JSON only. All fields must be derived from evidence above.
+Do not invent controls that have no evidence:
+{{
+  "controls_detected": [
+    {{
+      "control_type": "derived from evidence",
+      "confidence": "high|medium|low",
+      "evidence": "exact observation from tool output",
+      "implication": "what this means for our scanning"
+    }}
+  ],
+  "evasion_strategy": "derived from detected controls + RAG",
+  "scan_adjustments": "specific technical adjustments needed",
+  "detection_risk": "our estimated risk of being detected/blocked",
+  "mitre_techniques": [],
+  "wave2_guidance": "how wave 2 should adapt based on findings"
+}}"""
+
+        raw = self._llm_with_timeout(prompt, timeout=90)
+        result = self._extract_json_robust(raw)
+
+        if result:
+            self._security_controls = result
+
+            for control in result.get("controls_detected", []):
+                if control.get("confidence") in ["high", "medium"]:
+                    self.memory.log_action(
+                        "EnumVulnAgent",
+                        "security_control_detected",
+                        f"{control.get('control_type')} "
+                        f"[{control.get('confidence')}]: "
+                        f"{control.get('evidence', '')[:100]}",
+                    )
+
+            for technique in result.get("mitre_techniques", []):
+                self.memory.log_action(
+                    "EnumVulnAgent", "mitre_technique", str(technique)
+                )
+
+            if result.get("evasion_strategy"):
+                self.log_info(
+                    f"🛡️ Security analysis: {result.get('wave2_guidance', '')[:150]}"
+                )
+
+            self.memory.save_state()
+        else:
+            self._security_controls = {}
+            self.log_warning("Security control analysis failed — proceeding without evasion")
+
+        return self._security_controls
+
+    def _extract_anomaly_patterns(self) -> str:
+        """
+        Extracts observable anomalies from tool outputs.
+        Used to build a meaningful RAG query about security controls.
+        Pure regex — no LLM, no assumptions.
+        """
+        patterns_found = []
+        all_output = "\n".join(str(v) for v in self.all_results.values())
+
+        if re.search(r"filtered", all_output, re.IGNORECASE):
+            patterns_found.append("port_filtered")
+        if re.search(r"reset|RST", all_output):
+            patterns_found.append("connection_reset")
+        if re.search(r"403|406|429", all_output):
+            patterns_found.append("http_blocked")
+        if re.search(r"timeout", all_output, re.IGNORECASE):
+            patterns_found.append("scan_timeout")
+
+        return " ".join(patterns_found) if patterns_found else "standard_responses"
 
     def _build_wave2_from_ports(self) -> list[dict[str, Any]]:
         """
@@ -470,6 +639,9 @@ You just ran nmap on a Linux target and got these results:
 Open ports and services: {dict(list(port_services.items())[:15])}
 Firewall/filtering detected: {firewall}
 
+Investigation history:
+{self._format_intelligence_history()}
+
 Knowledge base techniques:
 {rag_enum[:300] if rag_enum else 'use standard enum techniques'}
 
@@ -540,6 +712,93 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             return self._build_wave2_from_ports()
 
         return specs[: self.MAX_CONCURRENT]
+
+    def _update_intelligence_log(
+        self,
+        wave_num: int,
+        batch_results: dict,
+        analysis: dict,
+    ) -> None:
+        """
+        Asks the LLM to summarize what this wave taught us.
+
+        The LLM reads tool outputs and its own analysis.
+        It derives conclusions — they are not pre-filled fields.
+        The summary is stored and injected into the next wave's
+        decision prompt so each wave builds on the previous.
+        """
+        output_summary = self._summarize_batch_for_llm(batch_results)
+
+        prompt = f"""You just completed wave {wave_num} of active
+enumeration. Summarize what this wave taught you.
+
+Tools run and their outputs:
+{output_summary[:800]}
+
+Analysis conclusions from this wave:
+{json.dumps(analysis, default=str)[:400] if analysis else 'none'}
+
+Intelligence from previous waves:
+{self._format_intelligence_history()[:300]}
+
+Summarize the intelligence gained from wave {wave_num}.
+Be specific about what was confirmed, what was ruled out,
+and what new questions emerged. Your summary will guide
+the next wave's decisions — make it actionable.
+
+Return JSON:
+{{
+  "wave": {wave_num},
+  "tools_run": [],
+  "what_was_confirmed": "derived from tool output",
+  "what_was_ruled_out": "derived from failed/empty tool runs",
+  "new_questions": "what the evidence raises but doesn't answer",
+  "next_wave_priority": "what deserves focused attention next",
+  "mitre_techniques_applied": []
+}}"""
+
+        raw = self._llm_with_timeout(prompt, timeout=60)
+        summary = self._extract_json_robust(raw)
+
+        if not summary:
+            ports = self._extract_all_ports()
+            summary = {
+                "wave": wave_num,
+                "tools_run": list(batch_results.keys()),
+                "what_was_confirmed": f"{len(ports)} ports found",
+                "what_was_ruled_out": "",
+                "new_questions": "",
+                "next_wave_priority": "continue enumeration",
+                "mitre_techniques_applied": [],
+            }
+
+        self.intelligence_log.append(summary)
+
+        self.memory.log_action(
+            "EnumVulnAgent",
+            f"wave_{wave_num}_intelligence",
+            str(summary.get("next_wave_priority", ""))[:200],
+        )
+
+    def _format_intelligence_history(self) -> str:
+        """
+        Compact summary of all previous wave intelligence.
+        Injected into each new wave's LLM decision prompt.
+        """
+        if not self.intelligence_log:
+            return "No previous waves completed."
+
+        parts = []
+        for entry in self.intelligence_log[-3:]:
+            wave = entry.get("wave", "?")
+            confirmed = entry.get("what_was_confirmed", "")
+            priority = entry.get("next_wave_priority", "")
+            parts.append(
+                f"Wave {wave}: confirmed={confirmed[:80]}, "
+                f"next_priority={priority[:80]}"
+            )
+
+        return " | ".join(parts)
 
     def _build_wave3_vuln_scan(self) -> list[dict[str, Any]]:
         """
@@ -1279,6 +1538,131 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
     # ── Stage 4: final report + persistence ───────────────────────────────────
 
+    def _reason_about_exploitability(self, vuln: dict) -> dict:
+        """
+        Reasons about whether a detected vulnerability is actually
+        exploitable given the evidence collected so far.
+
+        The LLM does not look up a static answer.
+        It reads evidence + RAG and REASONS to a conclusion.
+
+        Only vulnerabilities that pass this reasoning gate
+        get marked exploitable=True and reach ExploitationAgent.
+        """
+        cve = vuln.get("cve", "CVE-UNKNOWN")
+        service = vuln.get("service", "")
+        evidence = vuln.get("evidence", "")
+
+        rag_collections_to_query = [
+            ("cve_database", f"{cve} {service} affected versions CVSS vector"),
+            ("exploitdb", f"{cve} {service} exploit proof of concept"),
+            ("nuclei_templates", f"{service} detection template"),
+            ("hacktricks", f"{service} exploitation manual technique"),
+            ("payloads", f"{service} payload attack vector"),
+        ]
+
+        rag_context_parts = []
+        for collection, query in rag_collections_to_query:
+            try:
+                hits = self.chroma.get_rag_context(
+                    query,
+                    collections=[collection],
+                    n=2,
+                )
+                if hits:
+                    text = self._format_rag(hits, max_chars=200)
+                    rag_context_parts.append(f"[{collection}]\n{text}")
+            except Exception:
+                pass
+
+        combined_rag = "\n\n".join(rag_context_parts)
+
+        tool_evidence = self._build_full_output_summary()
+
+        prompt = f"""You are evaluating whether a vulnerability finding
+is genuinely exploitable. Your job is to reason carefully,
+not to confirm or deny reflexively.
+
+Vulnerability under evaluation:
+{json.dumps(vuln, default=str, indent=2)[:400]}
+
+Evidence from tool execution that detected this:
+{tool_evidence[:600]}
+
+Knowledge base context for this vulnerability:
+{combined_rag[:800] if combined_rag else 'No RAG matches found'}
+
+Reasoning task:
+Evaluate this vulnerability finding critically. Consider:
+
+1. VERSION EVIDENCE: Does the tool output actually confirm
+   the specific version that is vulnerable? Quote the exact
+   line that provides version evidence.
+
+2. EXPLOITABILITY CONDITIONS: Based on the knowledge base,
+   what conditions must be met for exploitation?
+   Are those conditions present in the evidence?
+
+3. EXPLOIT AVAILABILITY: Does the knowledge base show a
+   working exploit or only a vulnerability description?
+
+4. ATTACK PATH: What would an attacker need to do step by step?
+   How complex is this path? What could block it?
+
+5. FALSE POSITIVE RISK: What would cause this to be a false
+   positive? Is there any evidence that reduces confidence?
+
+Based on this reasoning, return your assessment:
+{{
+  "exploitable": true,
+  "confidence": "high|medium|low",
+  "confidence_reasoning": "what evidence drives this confidence",
+  "version_evidence": "exact line from tool output or null",
+  "exploit_availability": "what the knowledge base shows",
+  "attack_path_complexity": "what is required to exploit",
+  "false_positive_risk": "what could make this wrong",
+  "exploitation_context": "what ExploitationAgent needs to know",
+  "mitre_technique": "most applicable T-code"
+}}"""
+
+        raw = self._llm_with_timeout(prompt, timeout=90)
+        reasoning = self._extract_json_robust(raw)
+
+        if reasoning:
+            vuln["exploitable"] = bool(reasoning.get("exploitable", False))
+            vuln["confidence"] = reasoning.get("confidence", "low")
+            vuln["exploitability_reasoning"] = reasoning.get(
+                "confidence_reasoning", ""
+            )
+            vuln["exploitation_context"] = reasoning.get(
+                "exploitation_context", ""
+            )
+            vuln["false_positive_risk"] = reasoning.get(
+                "false_positive_risk", ""
+            )
+
+            mitre = reasoning.get("mitre_technique", "").strip()
+            if mitre:
+                vuln["mitre_technique"] = mitre
+                self.memory.log_action(
+                    "EnumVulnAgent", "mitre_technique", mitre
+                )
+
+            if (reasoning.get("exploitable")
+                    and reasoning.get("confidence") == "high"):
+                self.log_success(
+                    f"⚡ HIGH CONFIDENCE EXPLOITABLE: "
+                    f"{vuln.get('cve', '?')} [{service}]"
+                )
+            else:
+                self.log_info(
+                    f"ℹ️ Not marked exploitable: "
+                    f"{vuln.get('cve', '?')} "
+                    f"[confidence: {reasoning.get('confidence', '?')}]"
+                )
+
+        return vuln
+
     def _compile_vuln_report(self, analysis: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(analysis, dict):
             analysis = {}
@@ -1320,6 +1704,15 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 if severity not in {"critical", "high", "medium", "low", "info"}:
                     vuln_obj["severity"] = "info"
                 cleaned_vulns.append(vuln_obj)
+
+        # Exploitability reasoning: LLM evaluates critical/high vulns
+        enriched_vulns = []
+        for vuln in cleaned_vulns:
+            sev = vuln.get("severity", "info").lower()
+            if sev in ["critical", "high"]:
+                vuln = self._reason_about_exploitability(vuln)
+            enriched_vulns.append(vuln)
+        cleaned_vulns = enriched_vulns
 
         self.vulnerabilities = cleaned_vulns
 
@@ -1398,7 +1791,55 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         elif stats["medium"] > 0:
             risk_score = "medium"
 
-        return {
+        # LLM-derived critical path analysis for ExploitationAgent
+        attack_summary = {}
+        if cleaned_vulns:
+            critical_path_prompt = f"""Given these vulnerability findings
+from active enumeration of {self.target}:
+
+{json.dumps([{
+    'cve': v.get('cve'),
+    'service': v.get('service'),
+    'severity': v.get('severity'),
+    'confidence': v.get('confidence'),
+    'exploitable': v.get('exploitable'),
+    'exploitation_context': v.get('exploitation_context', '')
+} for v in cleaned_vulns[:10]], default=str, indent=2)[:1200]}
+
+Security controls detected:
+{json.dumps(self._security_controls, default=str)[:300]}
+
+Determine the optimal attack path for ExploitationAgent.
+Reason about: which vulnerability has the highest probability
+of success? Which provides the most valuable access?
+What is the complete picture of attack vectors available?
+
+Return JSON:
+{{
+  "critical_path": {{
+    "service": "derived from findings",
+    "port": 0,
+    "cve": "derived from findings",
+    "confidence": "derived from exploitability reasoning",
+    "why_first": "reasoning for this priority"
+  }},
+  "all_attack_vectors": [
+    {{
+      "service": "from findings",
+      "vector_type": "from knowledge base",
+      "priority": 1,
+      "requires": "what conditions must hold"
+    }}
+  ],
+  "recommended_exploits": [],
+  "evasion_needed": false,
+  "exploitation_guidance": "overall strategy for next phase"
+}}"""
+
+            raw = self._llm_with_timeout(critical_path_prompt, timeout=90)
+            attack_summary = self._extract_json_robust(raw) or {}
+
+        result = {
             "agent": "EnumVulnAgent",
             "success": True,
             "result": {
@@ -1416,9 +1857,36 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 "mitre_attack_chain": dedup_chain,
                 "iterations_completed": self.iteration,
                 "tools_used": list(self.all_results.keys()),
+                "critical_path": attack_summary.get("critical_path", {}),
+                "all_attack_vectors": attack_summary.get("all_attack_vectors", []),
+                "recommended_exploits": attack_summary.get("recommended_exploits", []),
+                "security_controls": self._security_controls,
+                "exploitation_guidance": attack_summary.get("exploitation_guidance", ""),
+                "intelligence_log": self.intelligence_log,
             },
             "raw_outputs": self.all_results,
         }
+
+        # Store full enumeration context in ChromaDB for ExploitationAgent
+        try:
+            self.chroma.store_mission_finding(
+                mission_id=self.memory.mission_id,
+                agent="EnumVulnAgent",
+                finding=self._build_full_output_summary(),
+                metadata={
+                    "type": "enumeration_complete",
+                    "target": self.target,
+                    "ports_found": len(ports),
+                    "vulns_found": len(cleaned_vulns),
+                    "exploitable_count": len([
+                        v for v in cleaned_vulns if v.get("exploitable")
+                    ]),
+                },
+            )
+        except Exception:
+            pass
+
+        return result
 
     def _write_findings_to_memory(self, findings: dict[str, Any]):
         result = findings.get("result", {}) if isinstance(findings, dict) else {}
