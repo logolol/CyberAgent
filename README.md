@@ -505,9 +505,9 @@ Day 6 focused on the **ExploitationAgent** and closing the loop between enumerat
     - `ExploitationAgent` checks for "bindshell", "backdoor", or "root shell" version strings.
     - Attempts immediate `nc` connection to verify shell access *before* any LLM planning.
 
-2.  **Deterministic Backdoor Detection**:
-    - `EnumVulnAgent` regex fallback now catches known backdoors (vsftpd 2.3.4, Samba 3.0.20, UnrealIRCd).
-    - Findings are force-marked `exploitable: True` and `severity: critical`, bypassing CVSS lookups (which often lack scores for backdoors).
+2.  **Autonomous Service Exploitation**:
+    - Parallel exploitation modules for HTTP (WebDAV/CGI), MySQL, PostgreSQL, IRC, NFS, distccd, and Tomcat.
+    - Pure Python execution (no LLM in loop) for maximum speed and reliability.
 
 3.  **Full Port Scan & Service Enrichment**:
     - Enumeration now scans **all 65,535 ports** (up from top 1000).
@@ -519,10 +519,10 @@ Day 6 focused on the **ExploitationAgent** and closing the loop between enumerat
 ### Day 6 Snapshot
 
 ```
-✅ ExploitationAgent     : running, auto-exploits backdoors
-✅ Direct Access         : detects and connects to bindshells
-✅ Backdoor Regex        : catches vsftpd 2.3.4, Samba 3.0.20
-✅ Full Port Scan        : 1-65535 coverage
+✅ ExploitationAgent     : 4-phase autonomous engine (Direct → CVE → Service → Creds)
+✅ Parallel Execution    : ThreadPoolExecutor with stop-event on first shell
+✅ Backdoor Support      : Auto-detects vsftpd, UnrealIRCd, Samba backdoors
+✅ Credential Attacks    : Smart wordlist selection for SSH/FTP/Telnet
 ```
 
 ---
@@ -560,7 +560,7 @@ python3 src/memory/mission_memory.py
 | S4.5 | MCP PentestAI client + external intel fallback + command validation | ✅ |
 | S5-S6 | ReconAgent — LLM+RAG+MITRE wave-based passive recon, 30s internal targets | ✅ |
 | S7-S8 | EnumerationAgent — nmap, service fingerprint, WebDAV, active probing | 🔜 |
-| S9-S11 | ExploitationAgent — CVE matching, exploit execution, shell acquisition | ⏳ |
+| S9-S11 | ExploitationAgent — CVE matching, exploit execution, shell acquisition | ✅ |
 | S12-S13 | PrivEscAgent + PostExploitAgent | ⏳ |
 | S14-S15 | ReportingAgent — CVSS scoring, MITRE ATT&CK chain, executive summary | ⏳ |
 | S16-S17 | End-to-end mission run + ComunikCRM authorized test | ⏳ |

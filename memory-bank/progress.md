@@ -294,6 +294,13 @@ Commits: Pending
 - [x] Implemented `_check_direct_access()` for bindshell/backdoor ports (netcat)
 - [x] Implemented `_load_vulns_from_memory()` with port enrichment
 - [x] Logic to handle `confirmed_vulns` and `exploitable_vulns`
+- [x] **4-Phase Autonomous Exploitation:**
+    - **Phase 0:** Direct access (bindshell, anon FTP, rsh/rexec)
+    - **Phase 1:** CVE-confirmed exploits (LLM+RAG guided)
+    - **Phase 2:** Service exploitation (HTTP/WebDAV, MySQL, PostgreSQL, IRC, NFS, distccd, Tomcat)
+    - **Phase 3:** Credential attacks (Hydra with smart wordlists)
+- [x] Parallel execution with `ThreadPoolExecutor` and stop-event on first shell
+- [x] MITRE ATT&CK mapping for all exploitation techniques
 
 ### Intelligence Improvements
 - [x] Regex fallback detects vsftpd 2.3.4, Samba 3.0.20, UnrealIRCd backdoors
