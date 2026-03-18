@@ -735,6 +735,59 @@ class BaseAgent:
             border_style="red",
         ))
 
+    def _llm_with_timeout(
+        self, prompt: str, timeout: int = 45
+    ) -> str:
+        """
+        Run self.llm.invoke(prompt) with a timeout.
+        Returns raw response string or empty string on failure.
+        Safe to call from any agent that inherits BaseAgent.
+        """
+        import concurrent.futures
+        import threading
+        import weakref
+        import concurrent.futures.thread
+
+        class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
+            def _adjust_thread_count(self):
+                if self._idle_semaphore.acquire(timeout=0):
+                    return
+                def wcb(_, q=self._work_queue):
+                    q.put(None)
+                n = len(self._threads)
+                if n < self._max_workers:
+                    t = threading.Thread(
+                        target=concurrent.futures.thread._worker,
+                        args=(weakref.ref(self, wcb),
+                              self._work_queue,
+                              self._initializer,
+                              self._initargs),
+                    )
+                    t.daemon = True
+                    t.start()
+                    self._threads.add(t)
+                    concurrent.futures.thread._threads_queues[t] = \
+                        self._work_queue
+
+        ex = _DaemonExecutor(max_workers=1)
+        future = ex.submit(self.llm.invoke, prompt)
+        try:
+            response = future.result(timeout=timeout)
+            return (response.content
+                    if hasattr(response, "content")
+                    else str(response))
+        except concurrent.futures.TimeoutError:
+            self.log_warning(
+                f"LLM decision timed out after {timeout}s"
+            )
+            future.cancel()
+            return ""
+        except Exception as e:
+            self.log_warning(f"LLM call failed: {e}")
+            return ""
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+
     # ── Public helper methods (inherited by all specialists) ──────────────────
 
     def get_rag_for_task(self, task: str, n: int = 5) -> str:

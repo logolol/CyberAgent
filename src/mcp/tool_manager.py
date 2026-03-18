@@ -116,6 +116,17 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_executable(path: str) -> bool:
+    """
+    Return True only if current user can traverse to and execute path.
+    """
+    try:
+        os.stat(path)
+        return os.access(path, os.X_OK)
+    except (PermissionError, OSError):
+        return False
+
+
 class DynamicToolManager:
     """
     Autonomous tool discovery, installation and execution manager.
@@ -212,7 +223,7 @@ class DynamicToolManager:
                 if not base.exists():
                     continue
                 for entry in base.iterdir():
-                    if entry.is_file() and os.access(entry, os.X_OK):
+                    if entry.is_file() and _is_executable(str(entry)):
                         found[entry.name] = str(entry)
             except (PermissionError, OSError):
                 pass
@@ -250,7 +261,7 @@ class DynamicToolManager:
                         continue
                     # check venv bin
                     p = VENV_BIN / pkg
-                    if p.exists() and os.access(p, os.X_OK):
+                    if _is_executable(str(p)):
                         found[pkg] = str(p)
                     elif shutil.which(pkg):
                         found[pkg] = shutil.which(pkg)
@@ -261,7 +272,7 @@ class DynamicToolManager:
             gopath = Path(out.strip()) / "bin"
             if gopath.exists():
                 for entry in gopath.iterdir():
-                    if entry.is_file() and os.access(entry, os.X_OK):
+                    if entry.is_file() and _is_executable(str(entry)):
                         found[entry.name] = str(entry)
 
         # 6. Extra find in common user dirs
@@ -269,7 +280,7 @@ class DynamicToolManager:
                       Path.home() / "go" / "bin"]:
             if extra.exists():
                 for entry in extra.iterdir():
-                    if entry.is_file() and os.access(entry, os.X_OK):
+                    if entry.is_file() and _is_executable(str(entry)):
                         found.setdefault(entry.name, str(entry))
 
         self.discovered = found
@@ -286,26 +297,33 @@ class DynamicToolManager:
         # 1. Cache
         if tool_name in self.discovered:
             p = self.discovered[tool_name]
-            if Path(p).exists():
-                return p
+            try:
+                os.stat(p)
+            except (PermissionError, OSError):
+                self.discovered.pop(tool_name, None)
+            else:
+                if _is_executable(p):
+                    return p
+            self.discovered.pop(tool_name, None)
 
         # 2. which (subprocess — catches shell aliases and /usr/local)
         rc, out, _ = _run(["which", tool_name], timeout=5)
         if rc == 0 and out.strip():
             path = out.strip()
-            self.discovered[tool_name] = path
-            return path
+            if _is_executable(path):
+                self.discovered[tool_name] = path
+                return path
 
         # 3. shutil.which
         p = shutil.which(tool_name)
-        if p:
+        if p and _is_executable(p):
             self.discovered[tool_name] = p
             return p
 
         # 4. Manual scan of search paths
         for base in self.search_paths:
             candidate = base / tool_name
-            if candidate.exists() and os.access(candidate, os.X_OK):
+            if _is_executable(str(candidate)):
                 self.discovered[tool_name] = str(candidate)
                 return str(candidate)
 
@@ -466,7 +484,7 @@ class DynamicToolManager:
         if rc == 0:
             # check venv bin first
             p = VENV_BIN / tool_name
-            if p.exists() and os.access(p, os.X_OK):
+            if _is_executable(str(p)):
                 return str(p)
             return self.find(tool_name)
         return None

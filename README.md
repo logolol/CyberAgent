@@ -493,6 +493,40 @@ This keeps actions evidence-driven and auditable across the full mission chain.
 
 ---
 
+## 🗓️ Day 6 — Agent Chain Working + Exploitation (Complete)
+
+### What was built on Day 6
+
+Day 6 focused on the **ExploitationAgent** and closing the loop between enumeration and exploitation. The system now autonomously identifies backdoors and executes exploits.
+
+### Key Features
+
+1.  **Direct Access Detection**:
+    - `ExploitationAgent` checks for "bindshell", "backdoor", or "root shell" version strings.
+    - Attempts immediate `nc` connection to verify shell access *before* any LLM planning.
+
+2.  **Deterministic Backdoor Detection**:
+    - `EnumVulnAgent` regex fallback now catches known backdoors (vsftpd 2.3.4, Samba 3.0.20, UnrealIRCd).
+    - Findings are force-marked `exploitable: True` and `severity: critical`, bypassing CVSS lookups (which often lack scores for backdoors).
+
+3.  **Full Port Scan & Service Enrichment**:
+    - Enumeration now scans **all 65,535 ports** (up from top 1000).
+    - Vulnerabilities are enriched with the correct port number, ensuring tools like Hydra target the right service.
+
+4.  **Shared Architecture**:
+    - `_llm_with_timeout` moved to `BaseAgent`, making robust LLM calls available to all agents.
+
+### Day 6 Snapshot
+
+```
+✅ ExploitationAgent     : running, auto-exploits backdoors
+✅ Direct Access         : detects and connects to bindshells
+✅ Backdoor Regex        : catches vsftpd 2.3.4, Samba 3.0.20
+✅ Full Port Scan        : 1-65535 coverage
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash

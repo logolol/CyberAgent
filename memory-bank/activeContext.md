@@ -4,9 +4,10 @@ Last updated: Day 5 (ReconAgent complete + intelligence hardening)
 
 ## Current Phase
 
-Sprint S5-S6 COMPLETE — ReconAgent built, tested, and intelligence-hardened.
+Sprint S9-S11 — ExploitationAgent running.
 
-Next: Sprint S7-S8 — EnumerationAgent.
+Current status: ExploitationAgent running, direct access detection added, backdoor services auto-detected.
+Next: PrivEscAgent implementation.
 
 ## Agent Intelligence Architecture (ALL agents)
 

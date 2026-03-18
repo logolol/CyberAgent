@@ -115,7 +115,7 @@ class OrchestratorAgent(BaseAgent):
     # Static phase gates: (description, result_field_to_check, minimum_value)
     PHASE_GATES: dict[str, tuple] = {
         "enumeration":  ("recon found live hosts",       "hosts_found",       1),
-        "exploitation": ("enum found exploitable vulns", "exploitable_vulns", 1),
+        "exploitation": ("enum found exploitable OR high/critical vulns", "exploitable_vulns", 1),
         "privesc":      ("exploitation got a shell",     "shells_obtained",   1),
         "postexploit":  ("privesc got elevated access",  "root_obtained",     True),
         "reporting":    ("always runs",                  None,                None),
@@ -673,7 +673,7 @@ class OrchestratorAgent(BaseAgent):
         Gate logic:
           recon       → always runs
           enumeration → need ≥1 live host in MissionMemory
-          exploitation→ need exploitable_vulns from EnumVulnAgent output
+          exploitation→ need exploitable_vulns >= 1 OR high/critical vulns from enum
           privesc     → need ≥1 confirmed shell (any user)
           postexploit → need ≥1 confirmed shell (any user is enough)
           reporting   → always runs
@@ -681,11 +681,38 @@ class OrchestratorAgent(BaseAgent):
         hosts = self.memory._state.get("hosts", {})
         enum_result = self.phase_results.get("enumeration", {}).get("result", {})
         exploitable_from_enum = 0
+        high_critical_from_enum = 0
         if isinstance(enum_result, dict):
             try:
                 exploitable_from_enum = int(enum_result.get("exploitable_vulns", 0) or 0)
             except (TypeError, ValueError):
                 exploitable_from_enum = 0
+
+            all_vulns = enum_result.get("vulnerabilities", [])
+            if isinstance(all_vulns, list):
+                high_critical_from_enum = len([
+                    v for v in all_vulns
+                    if isinstance(v, dict)
+                    and str(v.get("severity", "")).lower() in {"high", "critical"}
+                ])
+
+        if phase_name == "exploitation":
+            if exploitable_from_enum > 0:
+                return True, (
+                    f"Primary gate: exploitable_vulns from enum = {exploitable_from_enum}"
+                )
+
+            # Secondary gate: high/critical vulns exist even if exploitability
+            # reasoning was inconclusive.
+            if high_critical_from_enum >= 1:
+                return True, (
+                    f"Secondary gate: {high_critical_from_enum} high/critical vulns found"
+                )
+
+            return False, (
+                "Need exploitable_vulns >= 1 OR high/critical vulns from enum. "
+                f"Found: exploitable={exploitable_from_enum}, high_critical={high_critical_from_enum}"
+            )
 
         gates: dict = {
             "recon": lambda: (
@@ -699,10 +726,6 @@ class OrchestratorAgent(BaseAgent):
             "enumeration": lambda: (
                 len(hosts) > 0,
                 f"Need live hosts. Found: {len(hosts)}",
-            ),
-            "exploitation": lambda: (
-                exploitable_from_enum > 0,
-                f"Need exploitable_vulns from EnumVulnAgent output. Found: {exploitable_from_enum}",
             ),
             "privesc": lambda: (
                 any(len(h.get("shells", [])) > 0 for h in hosts.values()),
@@ -1105,6 +1128,14 @@ Return JSON:
             synthesis_prompt,
             task_complexity="medium",
         )
+
+        if "error" in briefing_data and not briefing_data.get("attack_priorities"):
+            # Try parsing raw response directly
+            raw = briefing_data.get("raw", "")
+            if raw:
+                parsed = self._extract_json_robust(raw)
+                if parsed and isinstance(parsed, dict):
+                    briefing_data = parsed
 
         if not briefing_data or "error" in briefing_data:
             return {

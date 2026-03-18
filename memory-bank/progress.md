@@ -278,4 +278,31 @@ Commits: `b4fc799`, `862e55a`, pending Day 5 intelligence/docs commit
 - [ ] S22: PFE thesis report writing
 - [ ] S22: Final defense presentation + live demo
 
+## ✅ Completed — Day 6 (Agent Chain Working + Exploitation)
+
+Sprint: S9-S11
+Commits: Pending
+
+### Full Chain Execution
+- [x] Full chain runs: Recon → Enum → Exploit → Report
+- [x] 30 ports discovered including backdoors (port 1524)
+- [x] CVE-2012-1823 confirmed by nuclei
+- [x] enum4linux + smbclient running in wave 2
+
+### ExploitationAgent
+- [x] Added `ExploitationAgent` class
+- [x] Implemented `_check_direct_access()` for bindshell/backdoor ports (netcat)
+- [x] Implemented `_load_vulns_from_memory()` with port enrichment
+- [x] Logic to handle `confirmed_vulns` and `exploitable_vulns`
+
+### Intelligence Improvements
+- [x] Regex fallback detects vsftpd 2.3.4, Samba 3.0.20, UnrealIRCd backdoors
+- [x] Backdoors now auto-marked `exploitable=True` (bypass CVSS dependency)
+- [x] Wave 1: full port scan 1-65535 with `--min-rate 1000`
+- [x] Wave 2: SERVICE_TOOLS - enum4linux, nikto, gobuster per service
+- [x] `_llm_with_timeout` moved to `BaseAgent` (shared by all agents)
+
+### Testing
+- [x] `tests/test_exploitation_agent.py` suite added
+
 ## 📦 Nothing Built Yet — Week 0

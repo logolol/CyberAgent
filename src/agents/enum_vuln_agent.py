@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures
 import concurrent.futures.thread
 import json
+import os
 import re
 import subprocess
 import sys
@@ -57,6 +58,19 @@ class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
             worker.start()
             self._threads.add(worker)
             concurrent.futures.thread._threads_queues[worker] = self._work_queue
+
+
+def _is_executable(path: str | Path | None) -> bool:
+    """
+    Return True only if the file is reachable and executable by current user.
+    """
+    try:
+        if not path:
+            return False
+        os.stat(path)
+        return os.access(path, os.X_OK)
+    except (PermissionError, OSError, TypeError):
+        return False
 
 
 class EnumVulnAgent(BaseAgent):
@@ -174,8 +188,14 @@ class EnumVulnAgent(BaseAgent):
                     "target": self.target,
                     "ports_found": self._extract_all_ports(),
                     "services_found": len(self._extract_all_services()),
+                    "services": self._extract_all_services(),
                     "vulnerabilities": self.vulnerabilities,
                     "exploitable_vulns": len([v for v in self.vulnerabilities if v.get("exploitable")]),
+                    "critical_path": {},
+                    "all_attack_vectors": [],
+                    "security_controls": self._security_controls,
+                    "intelligence_log": self.intelligence_log,
+                    "mitre_attack_chain": list(self.memory.state.get("mitre_techniques", [])),
                     "tools_used": list(self.all_results.keys()),
                 },
                 "raw_outputs": self.all_results,
@@ -261,7 +281,12 @@ class EnumVulnAgent(BaseAgent):
         else:
             scanner_name = Path(port_scanner).name
             if scanner_name == "nmap":
-                wave1_args = [self.target, "-sV", "-sC", "--top-ports", "1000", "-T4", "--open"]
+                wave1_args = [
+                    self.target, "-sV", "-sC",
+                    "-p", "1-65535",
+                    "-T4", "--open",
+                    "--min-rate", "1000"
+                ]
             elif scanner_name == "masscan":
                 wave1_args = [self.target, "-p1-1000", "--rate", "1000"]
             elif scanner_name == "rustscan":
@@ -284,172 +309,90 @@ class EnumVulnAgent(BaseAgent):
         self._analyze_security_controls()
 
         # Wave 2: LLM-driven service probing based on discovered ports.
-        port_services = self._extract_port_services()
-        if port_services:
-            self.log_info("Asking LLM+RAG what to enumerate next...")
-            wave2_specs = self._decide_wave2_with_llm(port_services)
-        else:
-            wave2_specs = []
-        if wave2_specs:
-            wave2_results = self._run_tool_batch(wave2_specs)
-            self.all_results.update(wave2_results)
-            self.log_success(f"Wave 2 complete: {len(wave2_results)} result(s)")
-            self._update_intelligence_log(2, wave2_results, {})
-        else:
-            self.log_info("Wave 2 skipped: no service probing specs generated")
+        try:
+            port_services = self._extract_port_services()
+            if port_services:
+                self.log_info("Asking LLM+RAG what to enumerate next...")
+                wave2_specs = self._decide_wave2_with_llm(port_services)
+            else:
+                wave2_specs = []
+            if wave2_specs:
+                wave2_results = self._run_tool_batch(wave2_specs)
+                self.all_results.update(wave2_results)
+                self.log_success(f"Wave 2 complete: {len(wave2_results)} result(s)")
+                self._update_intelligence_log(2, wave2_results, {})
+            else:
+                self.log_info("Wave 2 skipped: no specs generated")
+        except PermissionError as e:
+            self.log_warning(f"Wave 2: permission denied on tool — {e}")
+            self.log_warning("Continuing to wave 3 with wave 1 data")
+        except Exception as e:
+            self.log_warning(f"Wave 2 failed: {e} — continuing")
 
         # Wave 3: vulnerability-oriented scans.
-        wave3_specs = self._build_wave3_vuln_scan()
-        if wave3_specs:
-            wave3_results = self._run_tool_batch(wave3_specs)
-            self.all_results.update(wave3_results)
-            self.log_success(f"Wave 3 complete: {len(wave3_results)} result(s)")
-            self._update_intelligence_log(3, wave3_results, {})
-        else:
-            self.log_info("Wave 3 skipped: no vulnerability scanning tools available")
+        try:
+            wave3_specs = self._build_wave3_vuln_scan()
+            if wave3_specs:
+                wave3_results = self._run_tool_batch(wave3_specs)
+                self.all_results.update(wave3_results)
+                self.log_success(f"Wave 3 complete: {len(wave3_results)} result(s)")
+                self._update_intelligence_log(3, wave3_results, {})
+            else:
+                self.log_info("Wave 3 skipped: no scanners available")
+        except Exception as e:
+            self.log_warning(f"Wave 3 failed: {e} — proceeding to analysis")
 
         self.log_success(f"Gather phase complete: {len(self.all_results)} total tool output(s)")
 
     def _analyze_security_controls(self) -> dict:
         """
-        Analyzes wave 1 tool outputs to detect security controls.
-
-        The LLM reads real tool output and reasons about:
-          - What patterns in the output suggest filtering or blocking?
-          - What inconsistencies suggest stateful inspection?
-          - What response behaviors suggest active monitoring?
-          - What anomalies suggest honeypots or deception?
-
-        The LLM then queries its own reasoning + RAG to determine:
-          - What evasion techniques are appropriate?
-          - What scanning adjustments should wave 2 make?
-          - What MITRE techniques cover this situation?
-
-        Never assumes what controls exist — derives from evidence only.
+        Detect security controls from wave 1 output.
+        Pure regex — no LLM, instant, always works.
         """
-        raw_evidence = self._build_full_output_summary()
-
-        detection_context = ""
-        evasion_context = ""
-        mitre_context = ""
-
-        try:
-            observed_patterns = self._extract_anomaly_patterns()
-
-            detection_context = self._format_rag(
-                self.chroma.get_rag_context(
-                    f"linux firewall detection {observed_patterns} "
-                    f"IDS IPS evasion scanning techniques",
-                    collections=["hacktricks", "mitre_attack"],
-                    n=3,
-                ),
-                max_chars=400,
-            )
-
-            evasion_context = self._format_rag(
-                self.chroma.get_rag_context(
-                    f"firewall bypass evasion nmap techniques "
-                    f"packet fragmentation slow scan decoy",
-                    collections=["payloads", "hacktricks"],
-                    n=2,
-                ),
-                max_chars=300,
-            )
-
-            mitre_context = self._format_rag(
-                self.chroma.get_rag_context(
-                    "MITRE ATT&CK T1562 impair defenses "
-                    "T1027 obfuscation T1090 proxy evasion",
-                    collections=["mitre_attack"],
-                    n=2,
-                ),
-                max_chars=200,
-            )
-        except Exception as e:
-            self.log_warning(f"Security control RAG query failed: {e}")
-
-        prompt = f"""You are analyzing the output of active scanning tools
-against a Linux server. Your task is to reason about what the
-tool outputs reveal about security controls on the target.
-
-Raw tool output evidence:
-{raw_evidence[:800]}
-
-Security control detection methodology from knowledge base:
-{detection_context}
-
-Evasion technique references:
-{evasion_context}
-
-MITRE ATT&CK defensive evasion context:
-{mitre_context}
-
-Reasoning task:
-Read the tool outputs carefully. Look for patterns that reveal
-the presence or absence of security controls. Consider:
-  - Port response consistency (all open? some filtered? mixed?)
-  - Response timing patterns (uniform? variable? slowdown?)
-  - Unexpected closures or resets mid-scan
-  - HTTP response codes that suggest active filtering
-  - Absence of expected services that should be present
-
-Based ONLY on what the evidence shows, determine:
-1. What security controls appear to be present?
-2. How confident are you in each detection? What evidence supports it?
-3. What does this mean for our scanning strategy?
-4. What adjustments should we make to maximize discovery?
-5. Which MITRE techniques apply to this evasion scenario?
-
-Return JSON only. All fields must be derived from evidence above.
-Do not invent controls that have no evidence:
-{{
-  "controls_detected": [
-    {{
-      "control_type": "derived from evidence",
-      "confidence": "high|medium|low",
-      "evidence": "exact observation from tool output",
-      "implication": "what this means for our scanning"
-    }}
-  ],
-  "evasion_strategy": "derived from detected controls + RAG",
-  "scan_adjustments": "specific technical adjustments needed",
-  "detection_risk": "our estimated risk of being detected/blocked",
-  "mitre_techniques": [],
-  "wave2_guidance": "how wave 2 should adapt based on findings"
-}}"""
-
-        raw = self._llm_with_timeout(prompt, timeout=90)
-        result = self._extract_json_robust(raw)
-
-        if result:
-            self._security_controls = result
-
-            for control in result.get("controls_detected", []):
-                if control.get("confidence") in ["high", "medium"]:
-                    self.memory.log_action(
-                        "EnumVulnAgent",
-                        "security_control_detected",
-                        f"{control.get('control_type')} "
-                        f"[{control.get('confidence')}]: "
-                        f"{control.get('evidence', '')[:100]}",
-                    )
-
-            for technique in result.get("mitre_techniques", []):
+        all_output = "\n".join(
+            str(v) for v in self.all_results.values()
+        )
+        
+        controls = {
+            "firewall": None,
+            "ids": None,
+            "waf": None,
+            "evasion_needed": False,
+            "scan_adjustments": ""
+        }
+        
+        # Evidence-based detection only
+        filtered_count = len(re.findall(
+            r'filtered', all_output, re.IGNORECASE
+        ))
+        reset_count = len(re.findall(r'RST|reset', all_output))
+        
+        if filtered_count > 5:
+            controls["firewall"] = "packet_filtering"
+            controls["evasion_needed"] = True
+            controls["scan_adjustments"] = "-T2 --scan-delay 1s"
+        
+        if re.search(r'WAF|Web Application Firewall|403.*unusual',
+                      all_output, re.IGNORECASE):
+            controls["waf"] = "detected"
+            controls["evasion_needed"] = True
+        
+        # Log what was found
+        for k, v in controls.items():
+            if v and k not in ["evasion_needed", "scan_adjustments"]:
                 self.memory.log_action(
-                    "EnumVulnAgent", "mitre_technique", str(technique)
+                    "EnumVulnAgent",
+                    "security_control_detected",
+                    f"{k}={v}"
                 )
-
-            if result.get("evasion_strategy"):
-                self.log_info(
-                    f"🛡️ Security analysis: {result.get('wave2_guidance', '')[:150]}"
-                )
-
-            self.memory.save_state()
-        else:
-            self._security_controls = {}
-            self.log_warning("Security control analysis failed — proceeding without evasion")
-
-        return self._security_controls
+        
+        self._security_controls = controls
+        self.log_info(
+            f"Security controls: firewall={controls['firewall']} "
+            f"waf={controls['waf']} "
+            f"evasion={controls['evasion_needed']}"
+        )
+        return controls
 
     def _extract_anomaly_patterns(self) -> str:
         """
@@ -474,71 +417,221 @@ Do not invent controls that have no evidence:
     def _build_wave2_from_ports(self) -> list[dict[str, Any]]:
         """
         Build service-probing specs by regex parsing open ports from current outputs.
+        Uses the RIGHT tool for each service — not just nmap.
+        No LLM needed — deterministic service-to-tool mapping.
         """
         import os
-
+        
         open_ports: dict[int, str] = {}
         for output in self.all_results.values():
             for match in re.finditer(
-                r"(?m)(\d{1,5})/(tcp|udp)\s+open(?:\|filtered)?\s+([^\s]+)",
+                r"(\d{1,5})/(tcp|udp)\s+open(?:\|filtered)?\s+([^\s]+)",
                 str(output),
             ):
                 try:
                     port = int(match.group(1))
                 except Exception:
                     continue
-                service = str(match.group(3)).strip().lower() or "unknown"
+                service = str(match.group(3)).strip().lower()
                 if 1 <= port <= 65535:
                     open_ports[port] = service
-
+        
         if not open_ports:
             return []
-
-        self.log_info(f"Wave 2 planning from discovered ports: {sorted(list(open_ports.keys()))[:10]}")
-
+        
+        self.log_info(
+            f"Wave 2 planning from ports: "
+            f"{sorted(list(open_ports.keys()))[:15]}"
+        )
+        
+        # Service-to-tool mapping — deterministic, no LLM
+        # Each entry: (service_keywords, tool, args_fn, timeout)
+        SERVICE_TOOLS = [
+            # SMB/NetBIOS — critical for lateral movement
+            (
+                lambda p, s: p in [139, 445] or "netbios" in s or "smb" in s,
+                "enum4linux",
+                lambda t, p: ["-a", t],
+                90,
+            ),
+            (
+                lambda p, s: p in [139, 445] or "netbios" in s or "smb" in s,
+                "smbclient",
+                lambda t, p: ["-L", f"//{t}/", "-N"],
+                30,
+            ),
+            # HTTP/HTTPS — web enumeration
+            (
+                lambda p, s: p in [80, 8080, 8180, 8443, 443] or "http" in s,
+                "nikto",
+                lambda t, p: ["-h", f"http://{{t}}:{{p}}", "-maxtime", "120"],
+                180,
+            ),
+            (
+                lambda p, s: p in [80, 8080, 8180] or "http" in s,
+                "gobuster",
+                lambda t, p: [
+                    "dir", "-u", f"http://{{t}}:{{p}}",
+                    "-w", "/usr/share/wordlists/dirb/common.txt",
+                    "-t", "20", "-q", "--no-error"
+                ],
+                120,
+            ),
+            # FTP — check anonymous login
+            (
+                lambda p, s: p in [21, 2121] or "ftp" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV", "-sC",
+                    "--script", "ftp-anon,ftp-bounce,ftp-syst,ftp-vsftpd-backdoor",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # MySQL — anonymous access
+            (
+                lambda p, s: p == 3306 or "mysql" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "mysql-empty-password,mysql-info,mysql-databases",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # SSH — version and known vulns
+            (
+                lambda p, s: p == 22 or "ssh" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "ssh-auth-methods,ssh2-enum-algos",
+                    "-p", str(p), "-T4"
+                ],
+                30,
+            ),
+            # RPC/NFS — mount points
+            (
+                lambda p, s: p in [111, 2049] or "rpc" in s or "nfs" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "rpcinfo,nfs-ls,nfs-showmount",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # IRC — check for backdoors
+            (
+                lambda p, s: p == 6667 or "irc" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "irc-info,irc-unrealircd-backdoor",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # Bindshell / suspicious ports — connect directly
+            (
+                lambda p, s: p in [1524, 4444, 5555, 31337] or "backdoor" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV", "--script", "banner",
+                    "-p", str(p), "-T4"
+                ],
+                30,
+            ),
+            # VNC
+            (
+                lambda p, s: p == 5900 or "vnc" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "vnc-info,vnc-brute",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # PostgreSQL
+            (
+                lambda p, s: p == 5432 or "postgresql" in s or "postgres" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "pgsql-brute",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+            # Tomcat / Java
+            (
+                lambda p, s: p in [8080, 8180, 8443] or "tomcat" in s or "jserv" in s,
+                "nmap",
+                lambda t, p: [
+                    t, "-sV",
+                    "--script", "http-tomcat-manager,ajp-request",
+                    "-p", str(p), "-T4"
+                ],
+                60,
+            ),
+        ]
+        
         specs: list[dict[str, Any]] = []
-        for port, service in list(open_ports.items())[: self.MAX_CONCURRENT * 2]:
-            purpose = f"enumerate {service} service on port {port}"
-            best_tool = ""
-
-            try:
-                candidates = self.tools.get_tools_for_purpose(purpose)
-            except Exception as e:
-                self.log_warning(f"Tool suggestion lookup failed for '{purpose}': {e}")
-                candidates = []
-
-            for candidate in candidates or []:
-                candidate_name = str(candidate).strip().split()[0]
-                if not candidate_name or candidate_name.lower() in self._completed_tools:
-                    continue
-                candidate_path = self.tools.find(candidate_name)
-                if candidate_path and os.access(candidate_path, os.X_OK):
-                    best_tool = Path(candidate_path).name
+        used_tools: set[str] = set()
+        
+        for port, service in sorted(open_ports.items()):
+            for (matcher, tool, args_fn, timeout) in SERVICE_TOOLS:
+                if len(specs) >= self.MAX_CONCURRENT * 3:
                     break
-
-            resolved_args = [self.target]
-            timeout = 60
-            if best_tool == "nmap":
-                resolved_args = [self.target, "-sV", "-sC", "-p", str(port), "-T4"]
-                timeout = 120
-            elif not best_tool:
-                nmap_path = self.tools.find("nmap")
-                if nmap_path and os.access(nmap_path, os.X_OK):
-                    best_tool = "nmap"
-                    resolved_args = [self.target, "-sV", "-sC", "-p", str(port), "-T4"]
-                    timeout = 120
-
-            if not best_tool:
-                continue
-
-            specs.append({
-                "tool_hint": best_tool,
-                "purpose": purpose,
-                "_resolved_args": resolved_args,
-                "_timeout": timeout,
-            })
-
-        return specs[: self.MAX_CONCURRENT]
+                try:
+                    if not matcher(port, service):
+                        continue
+                except Exception:
+                    continue
+                
+                # Check tool exists
+                tool_key = f"{tool}:{port}"
+                if tool_key in used_tools:
+                    continue
+                
+                tool_path = self.tools.find(tool)
+                if not tool_path:
+                    continue
+                try:
+                    import os
+                    os.stat(tool_path)
+                    if not os.access(tool_path, os.X_OK):
+                        continue
+                except (PermissionError, OSError):
+                    continue
+                
+                try:
+                    args = args_fn(self.target, port)
+                except Exception:
+                    args = [self.target]
+                
+                used_tools.add(tool_key)
+                specs.append({
+                    "tool_hint": tool,
+                    "purpose": f"{service} enumeration port {port}",
+                    "_resolved_args": [str(a) for a in args],
+                    "_timeout": timeout,
+                })
+        
+        # Sort by priority: SMB and HTTP first, then others
+        def priority(spec: dict) -> int:
+            purpose = spec.get("purpose", "")
+            if any(k in purpose for k in ["smb", "netbios"]):
+                return 0
+            if any(k in purpose for k in ["http", "ftp"]):
+                return 1
+            if "backdoor" in purpose or "bindshell" in purpose:
+                return 0  # highest priority
+            return 2
+        
+        specs.sort(key=priority)
+        return specs[:self.MAX_CONCURRENT * 2]
 
     def _extract_port_services(self) -> dict[int, str]:
         """Extracts {port: service} from all results. No LLM."""
@@ -565,8 +658,6 @@ Do not invent controls that have no evidence:
         MITRE ATT&CK guides technique selection.
         Falls back to _build_wave2_from_ports() if LLM unavailable.
         """
-        import os
-
         # Get nmap output summary
         nmap_summary = ""
         for key, output in self.all_results.items():
@@ -626,7 +717,7 @@ Do not invent controls that have no evidence:
         ]
         for tool in check_tools:
             path = self.tools.find(tool)
-            if path and os.access(path, os.X_OK):
+            if _is_executable(path):
                 available.append(tool)
 
         firewall = getattr(self, "_firewall_detected", False)
@@ -699,7 +790,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         for spec in decision.get("tool_batch", []):
             tool = str(spec.get("tool", "")).strip()
             path = self.tools.find(tool)
-            if path and os.access(path, os.X_OK):
+            if _is_executable(path):
                 specs.append({
                     "tool_hint": tool,
                     "purpose": spec.get("purpose", f"enumerate {tool}"),
@@ -720,59 +811,46 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         analysis: dict,
     ) -> None:
         """
-        Asks the LLM to summarize what this wave taught us.
-
-        The LLM reads tool outputs and its own analysis.
-        It derives conclusions — they are not pre-filled fields.
-        The summary is stored and injected into the next wave's
-        decision prompt so each wave builds on the previous.
+        Build wave intelligence summary from tool output — no LLM.
+        Pure extraction: ports, services, versions, CVEs found.
+        Fast and always works regardless of model availability.
         """
-        output_summary = self._summarize_batch_for_llm(batch_results)
-
-        prompt = f"""You just completed wave {wave_num} of active
-enumeration. Summarize what this wave taught you.
-
-Tools run and their outputs:
-{output_summary[:800]}
-
-Analysis conclusions from this wave:
-{json.dumps(analysis, default=str)[:400] if analysis else 'none'}
-
-Intelligence from previous waves:
-{self._format_intelligence_history()[:300]}
-
-Summarize the intelligence gained from wave {wave_num}.
-Be specific about what was confirmed, what was ruled out,
-and what new questions emerged. Your summary will guide
-the next wave's decisions — make it actionable.
-
-Return JSON:
-{{
-  "wave": {wave_num},
-  "tools_run": [],
-  "what_was_confirmed": "derived from tool output",
-  "what_was_ruled_out": "derived from failed/empty tool runs",
-  "new_questions": "what the evidence raises but doesn't answer",
-  "next_wave_priority": "what deserves focused attention next",
-  "mitre_techniques_applied": []
-}}"""
-
-        raw = self._llm_with_timeout(prompt, timeout=60)
-        summary = self._extract_json_robust(raw)
-
-        if not summary:
-            ports = self._extract_all_ports()
-            summary = {
-                "wave": wave_num,
-                "tools_run": list(batch_results.keys()),
-                "what_was_confirmed": f"{len(ports)} ports found",
-                "what_was_ruled_out": "",
-                "new_questions": "",
-                "next_wave_priority": "continue enumeration",
-                "mitre_techniques_applied": [],
-            }
-
+        all_output = "\n".join(str(v) for v in batch_results.values())
+        
+        # Extract what was actually found
+        ports_found = re.findall(
+            r'(\d+)/tcp\s+open\s+(\S+)', all_output
+        )
+        versions_found = self._extract_versions_from_outputs(
+            batch_results
+        )
+        cves_found = re.findall(
+            r'CVE-\d{4}-\d{4,7}', all_output, re.IGNORECASE
+        )
+        nuclei_found = re.findall(
+            r'\[([A-Za-z0-9_\-]+)\]\s*\[[a-z]+\]\s*\[(critical|high)\]',
+            re.sub(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', all_output)
+        )
+        
+        summary = {
+            "wave": wave_num,
+            "tools_run": list(batch_results.keys()),
+            "ports_found": [f"{p[0]}/{p[1]}" for p in ports_found[:10]],
+            "versions": versions_found,
+            "cves_in_output": list(set(cves_found))[:5],
+            "nuclei_critical_high": [n[0] for n in nuclei_found],
+            "next_wave_priority": (
+                f"Probe: {[p[1] for p in ports_found[:3]]}"
+                if ports_found else "continue enumeration"
+            ),
+        }
+        
         self.intelligence_log.append(summary)
+        self.memory.log_action(
+            "EnumVulnAgent",
+            f"wave_{wave_num}_intelligence",
+            str(summary.get("next_wave_priority",""))[:200]
+        )
 
         self.memory.log_action(
             "EnumVulnAgent",
@@ -1335,6 +1413,56 @@ Return JSON:
             "Return ONLY a JSON array of args. No tool name.\n"
             f'Example: ["-sV","-sC","--top-ports","1000","{target}"]'
         )
+        
+        # Known tools: deterministic args, no LLM needed
+        # This saves 30s × n_tools per wave
+        DETERMINISTIC_TOOLS = {
+            "nmap": lambda target, port=None: (
+                [target, "-sV", "-sC", "-p", str(port), "-T4"]
+                if port else
+                [target, "-sV", "-sC", "--top-ports", "1000", "-T4", "--open"]
+            ),
+            "enum4linux": lambda target, **_: ["-a", target],
+            "smbclient":  lambda target, **_: ["-L", f"//{target}/", "-N"],
+            "smbmap":     lambda target, **_: ["-H", target],
+            "nikto":      lambda target, **_: ["-h", f"http://{target}", "-Tuning", "13"],
+            "gobuster":   lambda target, **_: [
+                "dir", "-u", f"http://{target}",
+                "-w", "/usr/share/wordlists/dirb/common.txt",
+                "-t", "20", "-q"
+            ],
+            "hydra":      lambda target, **_: [
+                "-L", "/usr/share/wordlists/metasploit/unix_users.txt",
+                "-P", "/usr/share/wordlists/metasploit/unix_passwords.txt",
+                "-t", "4", "-f", target, "ssh"
+            ],
+            "curl":       lambda target, **_: ["-sI", "--max-time", "10", f"http://{target}"],
+            "nc":         lambda target, **_: ["-zv", target, "1-1024"],
+            "netcat":     lambda target, **_: ["-zv", target, "1-1024"],
+        }
+
+        # Extract port hint from purpose if present
+        port_hint = None
+        port_match = re.search(r'\bport\s+(\d+)\b', purpose, re.IGNORECASE)
+        if port_match:
+            port_hint = port_match.group(1)
+
+        if best_tool in DETERMINISTIC_TOOLS:
+            try:
+                kwargs = {"target": target}
+                if port_hint:
+                    kwargs["port"] = port_hint
+                args = DETERMINISTIC_TOOLS[best_tool](**kwargs)
+                spec["_resolved_args"] = [str(a) for a in args]
+                spec["_timeout"] = self._get_tool_timeout(purpose)
+                self.log_info(
+                    f"  → {best_tool} "
+                    f"{' '.join(str(a) for a in args[:5])}"
+                )
+                return spec  # ← RETURN EARLY, no LLM call
+            except Exception:
+                pass  # fall through to LLM resolution below
+
         raw = self._llm_with_timeout(arg_prompt, timeout=30)
         args = self._extract_args_from_llm(raw, target)
 
@@ -1555,129 +1683,208 @@ Return JSON:
     # ── Stage 4: final report + persistence ───────────────────────────────────
 
     def _reason_about_exploitability(self, vuln: dict) -> dict:
+        """Replaced by _batch_exploitability_reasoning(). Stub only."""
+        return vuln
+
+    def _batch_exploitability_reasoning(
+        self,
+        vulns: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         """
-        Reasons about whether a detected vulnerability is actually
-        exploitable given the evidence collected so far.
-
-        The LLM does not look up a static answer.
-        It reads evidence + RAG and REASONS to a conclusion.
-
-        Only vulnerabilities that pass this reasoning gate
-        get marked exploitable=True and reach ExploitationAgent.
+        One LLM call to reason about exploitability for all high/critical vulns.
         """
-        cve = vuln.get("cve", "CVE-UNKNOWN")
-        service = vuln.get("service", "")
-        evidence = vuln.get("evidence", "")
+        if not isinstance(vulns, list) or not vulns:
+            return vulns if isinstance(vulns, list) else []
 
-        rag_collections_to_query = [
-            ("cve_database", f"{cve} {service} affected versions CVSS vector"),
-            ("exploitdb", f"{cve} {service} exploit proof of concept"),
-            ("nuclei_templates", f"{service} detection template"),
-            ("hacktricks", f"{service} exploitation manual technique"),
-            ("payloads", f"{service} payload attack vector"),
+        candidate_indexes = [
+            i
+            for i, v in enumerate(vulns)
+            if isinstance(v, dict)
+            and str(v.get("severity", "info")).lower() in {"critical", "high"}
         ]
+        if not candidate_indexes:
+            return vulns
 
-        rag_context_parts = []
-        for collection, query in rag_collections_to_query:
+        target_vulns = [vulns[i] for i in candidate_indexes]
+        service_list = " ".join(sorted({
+            str(v.get("service", "")).strip()
+            for v in target_vulns[:8]
+            if isinstance(v, dict) and v.get("service")
+        }))
+        cve_list = " ".join(sorted({
+            str(v.get("cve", "")).strip()
+            for v in target_vulns[:8]
+            if isinstance(v, dict)
+            and str(v.get("cve", "")).startswith("CVE-")
+        }))
+
+        rag_context = ""
+        for collection, query in [
+            ("cve_database", f"{cve_list} CVSS severity exploit"),
+            ("exploitdb", f"{service_list} exploit public"),
+            ("hacktricks", f"{service_list} attack exploitation"),
+        ]:
             try:
-                hits = self.chroma.get_rag_context(
-                    query,
-                    collections=[collection],
-                    n=2,
-                )
-                if hits:
-                    text = self._format_rag(hits, max_chars=200)
-                    rag_context_parts.append(f"[{collection}]\n{text}")
+                hits = self.chroma.get_rag_context(query, collections=[collection], n=3)
             except Exception:
-                pass
+                hits = []
+            if hits:
+                rag_context += f"\n[{collection}]\n"
+                rag_context += "\n".join(str(h.get("text", ""))[:200] for h in hits)
 
-        combined_rag = "\n\n".join(rag_context_parts)
+        vuln_summaries: list[dict[str, Any]] = []
+        for idx in candidate_indexes:
+            vuln = vulns[idx]
+            if not isinstance(vuln, dict):
+                continue
+            vuln_summaries.append({
+                "index": idx,
+                "cve": vuln.get("cve", "CVE-UNKNOWN"),
+                "service": vuln.get("service", ""),
+                "severity": vuln.get("severity", "info"),
+                "cvss": vuln.get("cvss_score", 0.0),
+                "evidence": str(vuln.get("evidence", ""))[:100],
+                "exploit_available": vuln.get("exploit_available", False),
+            })
 
         tool_evidence = self._build_full_output_summary()
+        prompt = f"""Evaluate exploitability of these vulnerabilities
+found on a Linux target during authorized penetration testing.
 
-        prompt = f"""You are evaluating whether a vulnerability finding
-is genuinely exploitable. Your job is to reason carefully,
-not to confirm or deny reflexively.
-
-Vulnerability under evaluation:
-{json.dumps(vuln, default=str, indent=2)[:400]}
-
-Evidence from tool execution that detected this:
+Tool output evidence (what was actually observed):
 {tool_evidence[:600]}
 
-Knowledge base context for this vulnerability:
-{combined_rag[:800] if combined_rag else 'No RAG matches found'}
+Knowledge base context:
+{rag_context[:600] if rag_context else 'standard CVE data applies'}
 
-Reasoning task:
-Evaluate this vulnerability finding critically. Consider:
+Vulnerabilities to evaluate:
+{json.dumps(vuln_summaries, indent=2, default=str)[:1200]}
 
-1. VERSION EVIDENCE: Does the tool output actually confirm
-   the specific version that is vulnerable? Quote the exact
-   line that provides version evidence.
+For each vulnerability, reason about:
+- Is there concrete evidence of this version in the tool output?
+- Does the knowledge base show a working exploit exists?
+- Can it be exploited without authentication?
+- What is the attack complexity?
 
-2. EXPLOITABILITY CONDITIONS: Based on the knowledge base,
-   what conditions must be met for exploitation?
-   Are those conditions present in the evidence?
+Return JSON array with one entry per vuln index.
+Use only evidence above — do not invent:
+[
+  {{
+    "index": 0,
+    "exploitable": true,
+    "confidence": "high|medium|low",
+    "reasoning": "what evidence supports this"
+  }}
+]"""
 
-3. EXPLOIT AVAILABILITY: Does the knowledge base show a
-   working exploit or only a vulnerability description?
+        def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
+            if not text or not text.strip():
+                return None
 
-4. ATTACK PATH: What would an attacker need to do step by step?
-   How complex is this path? What could block it?
+            cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
+            if fence:
+                cleaned = fence.group(1)
 
-5. FALSE POSITIVE RISK: What would cause this to be a false
-   positive? Is there any evidence that reduces confidence?
+            for candidate in (cleaned, text.strip()):
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, list):
+                        return [x for x in parsed if isinstance(x, dict)]
+                except Exception:
+                    pass
 
-Based on this reasoning, return your assessment:
-{{
-  "exploitable": true,
-  "confidence": "high|medium|low",
-  "confidence_reasoning": "what evidence drives this confidence",
-  "version_evidence": "exact line from tool output or null",
-  "exploit_availability": "what the knowledge base shows",
-  "attack_path_complexity": "what is required to exploit",
-  "false_positive_risk": "what could make this wrong",
-  "exploitation_context": "what ExploitationAgent needs to know",
-  "mitre_technique": "most applicable T-code"
-}}"""
+            starts = [m.start() for m in re.finditer(r"\[", cleaned)]
+            for start in starts:
+                depth = 0
+                for i, ch in enumerate(cleaned[start:], start):
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            candidate = cleaned[start:i + 1]
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, list):
+                                    return [x for x in parsed if isinstance(x, dict)]
+                            except Exception:
+                                break
+            return None
 
-        raw = self._llm_with_timeout(prompt, timeout=90)
-        reasoning = self._extract_json_robust(raw)
+        raw = self._llm_with_timeout(prompt, timeout=180)
+        batch_result = _extract_json_array(raw)
 
-        if reasoning:
-            vuln["exploitable"] = bool(reasoning.get("exploitable", False))
-            vuln["confidence"] = reasoning.get("confidence", "low")
-            vuln["exploitability_reasoning"] = reasoning.get(
-                "confidence_reasoning", ""
-            )
-            vuln["exploitation_context"] = reasoning.get(
-                "exploitation_context", ""
-            )
-            vuln["false_positive_risk"] = reasoning.get(
-                "false_positive_risk", ""
-            )
+        if isinstance(batch_result, list):
+            result_map = {
+                item.get("index"): item
+                for item in batch_result
+                if isinstance(item, dict)
+            }
+            for idx in candidate_indexes:
+                vuln = vulns[idx]
+                if not isinstance(vuln, dict):
+                    continue
+                item = result_map.get(idx, {})
+                confidence = str(item.get("confidence", "low")).lower()
+                llm_exploitable = bool(item.get("exploitable", False))
 
-            mitre = reasoning.get("mitre_technique", "").strip()
-            if mitre:
-                vuln["mitre_technique"] = mitre
-                self.memory.log_action(
-                    "EnumVulnAgent", "mitre_technique", mitre
-                )
+                if llm_exploitable and confidence in ["high", "medium"]:
+                    vuln["exploitable"] = True
+                    vuln["confidence"] = confidence
+                    vuln["exploitability_reasoning"] = str(item.get("reasoning", ""))
+                    try:
+                        self.memory.add_vulnerability(
+                            ip=self._find_ip_for_service(str(vuln.get("service", ""))),
+                            cve=str(vuln.get("cve", "CVE-UNKNOWN")),
+                            cvss=float(vuln.get("cvss_score", 0.0) or 0),
+                            description=str(vuln.get("description", vuln.get("title", ""))),
+                            exploitable=True,
+                        )
+                    except Exception:
+                        pass
 
-            if (reasoning.get("exploitable")
-                    and reasoning.get("confidence") == "high"):
-                self.log_success(
-                    f"⚡ HIGH CONFIDENCE EXPLOITABLE: "
-                    f"{vuln.get('cve', '?')} [{service}]"
-                )
-            else:
-                self.log_info(
-                    f"ℹ️ Not marked exploitable: "
-                    f"{vuln.get('cve', '?')} "
-                    f"[confidence: {reasoning.get('confidence', '?')}]"
-                )
+                    mitre = str(vuln.get("mitre_technique", "")).strip()
+                    if mitre:
+                        self.memory.log_action(
+                            "EnumVulnAgent", "mitre_technique", mitre
+                        )
+                else:
+                    vuln["exploitable"] = False
+                    vuln["confidence"] = confidence
+                    if llm_exploitable and confidence == "low":
+                        self.log_info(
+                            f"  ℹ️  {vuln.get('cve', '?')} skipped: low confidence"
+                        )
+        else:
+            self.log_warning("Batch exploitability LLM failed — using CVSS fallback")
+            for idx in candidate_indexes:
+                vuln = vulns[idx]
+                if not isinstance(vuln, dict):
+                    continue
+                cvss = float(vuln.get("cvss_score", 0.0) or 0)
+                cve = str(vuln.get("cve", ""))
+                severity = str(vuln.get("severity", "")).lower()
+                confirmed = bool(vuln.get("confirmed"))
+                if (cvss >= 7.0 and cve.startswith("CVE-")) or (
+                    confirmed and severity in ["critical", "high"]
+                ):
+                    vuln["exploitable"] = True
+                    vuln["confidence"] = "medium"
+                    if cvss >= 7.0 and cve.startswith("CVE-"):
+                        vuln["exploitability_reasoning"] = (
+                            f"CVSS {cvss} >= 7.0 with confirmed CVE"
+                        )
+                    else:
+                        vuln["exploitability_reasoning"] = (
+                            f"Confirmed {severity} scanner finding"
+                        )
 
-        return vuln
+        exploitable_count = len([v for v in vulns if isinstance(v, dict) and v.get("exploitable")])
+        self.log_info(
+            f"Exploitability assessment: {exploitable_count}/{len(vulns)} exploitable"
+        )
+        return vulns
 
     def _compile_vuln_report(self, analysis: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(analysis, dict):
@@ -1695,8 +1902,11 @@ Based on this reasoning, return your assessment:
                     continue
                 if not (1 <= port_num <= 65535):
                     continue
+                normalized_ip = self._normalize_host_ip(
+                    str(item.get("ip", self.target) or self.target)
+                )
                 ports.append({
-                    "ip": str(item.get("ip", self.target) or self.target),
+                    "ip": normalized_ip,
                     "port": port_num,
                     "protocol": str(item.get("protocol", "tcp") or "tcp"),
                     "service": str(item.get("service", "unknown") or "unknown"),
@@ -1721,14 +1931,7 @@ Based on this reasoning, return your assessment:
                     vuln_obj["severity"] = "info"
                 cleaned_vulns.append(vuln_obj)
 
-        # Exploitability reasoning: LLM evaluates critical/high vulns
-        enriched_vulns = []
-        for vuln in cleaned_vulns:
-            sev = vuln.get("severity", "info").lower()
-            if sev in ["critical", "high"]:
-                vuln = self._reason_about_exploitability(vuln)
-            enriched_vulns.append(vuln)
-        cleaned_vulns = enriched_vulns
+        cleaned_vulns = self._batch_exploitability_reasoning(cleaned_vulns)
 
         self.vulnerabilities = cleaned_vulns
 
@@ -1914,8 +2117,11 @@ Return JSON:
             if not isinstance(port_info, dict):
                 continue
             try:
+                resolved_ip = self._normalize_host_ip(
+                    str(port_info.get("ip", self.target))
+                )
                 self.memory.add_port(
-                    ip=str(port_info.get("ip", self.target)),
+                    ip=resolved_ip,
                     port=int(port_info.get("port", 0)),
                     service=str(port_info.get("service", "unknown")),
                     version=str(port_info.get("version", "")),
@@ -2213,8 +2419,11 @@ Return JSON:
             if not isinstance(port_info, dict):
                 continue
             try:
+                resolved_ip = self._normalize_host_ip(
+                    str(port_info.get("ip", self.target))
+                )
                 self.memory.add_port(
-                    ip=str(port_info.get("ip", self.target)),
+                    ip=resolved_ip,
                     port=int(port_info.get("port", 0)),
                     service=str(port_info.get("service", "unknown")),
                     version=str(port_info.get("version", "")),
@@ -2250,6 +2459,7 @@ Return JSON:
         """Parse and deduplicate ports from all raw outputs."""
         seen: set[tuple[str, int, str]] = set()
         ports: list[dict[str, Any]] = []
+        normalized_target_ip = self._normalize_host_ip(self.target)
 
         for output in self.all_results.values():
             if not output:
@@ -2263,7 +2473,7 @@ Return JSON:
                 proto = match.group(2)
                 service = match.group(3).strip() or "unknown"
                 version = match.group(4).strip()[:100]
-                ip = self.target
+                ip = normalized_target_ip
                 key = (ip, port, proto)
                 if key in seen:
                     continue
@@ -2282,12 +2492,12 @@ Return JSON:
                 port = int(match.group(1))
                 if not (1 <= port <= 65535):
                     continue
-                key = (self.target, port, "tcp")
+                key = (normalized_target_ip, port, "tcp")
                 if key in seen:
                     continue
                 seen.add(key)
                 ports.append({
-                    "ip": self.target,
+                    "ip": normalized_target_ip,
                     "port": port,
                     "protocol": "tcp",
                     "service": "unknown",
@@ -2306,12 +2516,13 @@ Return JSON:
                     continue
                 if not (1 <= port <= 65535):
                     continue
-                key = (ip, port, "tcp")
+                normalized_ip = self._normalize_host_ip(str(ip))
+                key = (normalized_ip, port, "tcp")
                 if key in seen:
                     continue
                 seen.add(key)
                 ports.append({
-                    "ip": ip,
+                    "ip": normalized_ip,
                     "port": port,
                     "protocol": str(p.get("protocol", "tcp") or "tcp"),
                     "service": str(p.get("service", "unknown")),
@@ -2339,11 +2550,47 @@ Return JSON:
 
         return services
 
+    def _normalize_host_ip(self, raw_host: str | None) -> str:
+        """
+        Normalize a host identifier to an IPv4 key from attack_surface when possible.
+        """
+        candidate = str(raw_host or "").strip()
+        ip_pattern = r"^\d{1,3}(?:\.\d{1,3}){3}$"
+
+        if re.match(ip_pattern, candidate):
+            return candidate
+
+        target = str(self.target or "").strip()
+        candidate_l = candidate.lower()
+        target_l = target.lower()
+
+        for ip_addr, host_data in self.attack_surface.items():
+            ip_str = str(ip_addr).strip()
+            if not re.match(ip_pattern, ip_str):
+                continue
+
+            hostname = ""
+            if isinstance(host_data, dict):
+                hostname = str(host_data.get("hostname", "")).strip().lower()
+
+            if candidate_l in {hostname, target_l} or candidate_l == ip_str.lower():
+                return ip_str
+
+        if re.match(ip_pattern, target):
+            return target
+
+        for ip_addr in self.attack_surface.keys():
+            ip_str = str(ip_addr).strip()
+            if re.match(ip_pattern, ip_str):
+                return ip_str
+
+        return candidate or target
+
     def _find_ip_for_service(self, service: str) -> str:
         """Resolve host IP for service context, fallback to target."""
         service_l = str(service).lower().strip()
         if not service_l:
-            return self.target
+            return self._normalize_host_ip(self.target)
 
         for ip, host_data in self.attack_surface.items():
             ports = host_data.get("ports", []) if isinstance(host_data, dict) else []
@@ -2351,9 +2598,9 @@ Return JSON:
                 if not isinstance(p, dict):
                     continue
                 if service_l in str(p.get("service", "")).lower():
-                    return ip
+                    return self._normalize_host_ip(str(ip))
 
-        return self.target
+        return self._normalize_host_ip(self.target)
 
     def _format_rag(self, results: list[dict[str, Any]], max_chars: int) -> str:
         """Compact formatting for RAG snippets."""
@@ -2443,7 +2690,12 @@ Return JSON:
         Analyze outputs with regex + RAG when LLM analysis is unavailable.
         """
         outputs = batch_results if isinstance(batch_results, dict) else self.all_results
-        all_output = "\n".join(str(v) for v in outputs.values())
+        # Strip ANSI escape codes before parsing
+        # Nuclei embeds color codes even with -silent flag
+        _raw = "\n".join(str(v) for v in outputs.values())
+        all_output = re.sub(
+            r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', _raw
+        )
 
         ports: list[dict[str, Any]] = []
         seen_ports: set[int] = set()
@@ -2453,7 +2705,7 @@ Return JSON:
                 continue
             seen_ports.add(port_num)
             ports.append({
-                "ip": self.target,
+                "ip": self._normalize_host_ip(self.target),
                 "port": port_num,
                 "protocol": m.group(2),
                 "service": m.group(3),
@@ -2465,6 +2717,91 @@ Return JSON:
         versions = self._extract_versions_from_outputs(outputs)
         vulnerabilities: list[dict[str, Any]] = []
         seen_cves: set[str] = set()
+        nuclei_pattern = re.compile(
+            r"(?m)^\s*\[([A-Za-z0-9_\-\.]+)\]\s*"
+            r"\[([a-z]+)\]\s*"
+            r"\[(critical|high|medium|low|info)\]\s*"
+            r"(https?://\S+)?",
+            re.IGNORECASE,
+        )
+        cvss_map = {
+            "critical": 9.5,
+            "high": 7.5,
+            "medium": 5.5,
+            "low": 3.0,
+            "info": 0.0,
+        }
+        seen_nuclei: set[str] = set()
+
+        # Use sanitized all_output to avoid ANSI issues
+        for output in [all_output]:
+            for m in nuclei_pattern.finditer(str(output)):
+                template = m.group(1).strip()
+                protocol = m.group(2).strip().lower()
+                severity = m.group(3).strip().lower()
+                url = (m.group(4) or "").strip()
+                cvss = float(cvss_map.get(severity, 0.0))
+
+                cve_match = re.search(r"CVE-(\d{4})-(\d{4,7})", template, re.IGNORECASE)
+                cve_id = (
+                    f"CVE-{cve_match.group(1)}-{cve_match.group(2)}"
+                    if cve_match else "CVE-UNKNOWN"
+                )
+
+                key = f"{template}:{url}"
+                if key in seen_nuclei:
+                    continue
+                seen_nuclei.add(key)
+
+                if cve_id != "CVE-UNKNOWN":
+                    seen_cves.add(cve_id)
+
+                vulnerabilities.append({
+                    "title": f"Nuclei: {template}",
+                    "service": protocol,
+                    "cve": cve_id,
+                    "cvss_score": cvss,
+                    "severity": severity,
+                    "confirmed": True,
+                    "evidence": f"Nuclei confirmed: {url or template}",
+                    "exploitable": severity in ["critical", "high"],
+                    "exploit_available": cve_id != "CVE-UNKNOWN",
+                    "mitre_technique": "T1190",
+                })
+
+        # Detect backdoor/critical services from nmap output
+        backdoor_patterns = [
+            (r'vsftpd\s+2\.3\.4', 'vsftpd 2.3.4 backdoor',
+             'CVE-2011-2523', 9.8, 'ftp'),
+            (r'Bash\s+shell.*BACKDOOR', 'bindshell root backdoor',
+             'CVE-UNKNOWN', 10.0, 'bindshell'),
+            (r'UnrealIRCd.*3\.2', 'UnrealIRCd backdoor',
+             'CVE-2010-2075', 9.8, 'irc'),
+            (r'distccd.*4\.2', 'distccd remote code execution',
+             'CVE-2004-2687', 9.3, 'distccd'),
+            (r'Samba.*3\.0\.(1[0-9]|20)', 'Samba username map RCE',
+             'CVE-2007-2447', 10.0, 'smb'),
+        ]
+        
+        for pattern, title, cve, cvss, service in backdoor_patterns:
+            for output in outputs.values():
+                if re.search(pattern, str(output), re.IGNORECASE):
+                    cve_key = f"{cve}:{service}"
+                    if cve_key in seen_cves:
+                        continue
+                    seen_cves.add(cve_key)
+                    vulnerabilities.append({
+                        "title": title,
+                        "service": service,
+                        "cve": cve,
+                        "cvss_score": cvss,
+                        "severity": "critical",
+                        "confirmed": True,
+                        "evidence": f"Version string detected in scan output",
+                        "exploitable": True,
+                        "mitre_technique": "T1190",
+                    })
+                    break
 
         for service, version in list(versions.items())[:6]:
             try:
@@ -2634,22 +2971,4 @@ Return JSON:
         self.log_warning(f"JSON extraction failed from: {text[:200]!r}")
         return None
 
-    def _llm_with_timeout(self, prompt: str, timeout: int = 45) -> str:
-        """
-        Run self.llm.invoke(prompt) in a daemonized thread with timeout.
-        Returns raw response string or "" on timeout/failure.
-        """
-        ex = _DaemonThreadPoolExecutor(max_workers=1)
-        future = ex.submit(self.llm.invoke, prompt)
-        try:
-            response = future.result(timeout=timeout)
-            return response.content if hasattr(response, "content") else str(response)
-        except concurrent.futures.TimeoutError:
-            self.log_warning(f"LLM decision timed out after {timeout}s")
-            future.cancel()
-            return ""
-        except Exception as e:
-            self.log_warning(f"LLM call failed: {e}")
-            return ""
-        finally:
-            ex.shutdown(wait=False, cancel_futures=True)
+
