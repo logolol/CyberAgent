@@ -83,7 +83,7 @@ def get_llm(role: Literal["default", "reasoning"] = "default"):
     else:
         print(f"[LLMFactory] ⚠ [{role}] → {model} (cross-role fallback)")
 
-    kwargs = dict(model=model, base_url=base_url, temperature=temperature, num_ctx=num_ctx)
+    kwargs = dict(model=model, base_url=base_url, temperature=temperature, num_ctx=num_ctx, keep_alive="10m")
     if num_predict is not None:
         kwargs["num_predict"] = num_predict
     return OllamaLLM(**kwargs)
