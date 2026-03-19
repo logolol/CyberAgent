@@ -154,11 +154,18 @@ class MissionMemory:
         self.save_state()
 
     def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = ""):
-        valid_types = {"bash", "sh", "meterpreter", "webshell", "reverse", "bind", "unknown"}
+        valid_types = {
+            "shell", "root_shell", "meterpreter", "webshell",
+            "reverse_shell", "bind_shell", "bindshell",
+            "anon_ftp", "ftp_login", "rsh", "rexec", "telnet",
+            "rce", "session", "unknown",
+            "bash", "sh", "reverse", "bind"  # Legacy compat
+        }
         shell_type = str(shell_type).strip().lower()
         if shell_type not in valid_types:
-            _log.warning(f"add_shell: unknown shell_type '{shell_type}' → 'unknown'")
-            shell_type = "unknown"
+            _log.warning(f"add_shell: unknown shell_type '{shell_type}' (keeping as-is)")
+            # Do NOT change to "unknown" — keep specific type for evidence
+        
         user = str(user).strip()
         if not user:
             user = "unknown"
