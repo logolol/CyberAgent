@@ -34,6 +34,7 @@ class MissionMemory:
             "status": "running",
             "hosts": {},
             "attack_chain": [],
+            "attack_graph": {"nodes": []},  # Prioritized exploit targets
             "mitre_techniques": [],
             "current_agent": "",
             "notes": [],
@@ -248,6 +249,125 @@ class MissionMemory:
     def add_note(self, note: str):
         self._state["notes"].append(note)
         self.save_state()
+
+    # ── Attack Graph management ────────────────────────────────
+    # Impact weights for prioritization: root=1.0, user=0.7, service=0.4, info=0.1
+    _IMPACT_WEIGHTS = {"root": 1.0, "user": 0.7, "service": 0.4, "info": 0.1}
+
+    def add_attack_node(
+        self,
+        ip: str,
+        port: int,
+        service: str,
+        version: str,
+        cve: str,
+        confidence: float,
+        impact: str,
+        evidence: str,
+    ) -> str:
+        """
+        Add a prioritized exploit target node to the attack graph.
+        Returns the node_id for later updates.
+        """
+        # Validate inputs
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            _log.warning(f"add_attack_node: invalid port '{port}' — skipping")
+            return ""
+        confidence = max(0.0, min(1.0, float(confidence)))
+        impact = impact.lower() if impact else "info"
+        if impact not in self._IMPACT_WEIGHTS:
+            _log.warning(f"add_attack_node: unknown impact '{impact}' → using 'info'")
+            impact = "info"
+
+        node_id = f"{ip}:{port}:{service}"
+        
+        # Initialize attack_graph if missing (legacy state files)
+        if "attack_graph" not in self._state:
+            self._state["attack_graph"] = {"nodes": []}
+        
+        # Check for existing node
+        for existing in self._state["attack_graph"]["nodes"]:
+            if existing.get("id") == node_id:
+                # Update if new confidence is higher
+                if confidence > existing.get("confidence", 0):
+                    existing.update({
+                        "version": version,
+                        "cve": cve,
+                        "confidence": confidence,
+                        "impact": impact,
+                        "evidence": evidence,
+                    })
+                    self.save_state()
+                return node_id
+
+        node = {
+            "id": node_id,
+            "ip": ip,
+            "port": port,
+            "service": service,
+            "version": version,
+            "cve": cve,
+            "confidence": confidence,
+            "impact": impact,
+            "state": "untried",
+            "evidence": evidence,
+            "attempts": [],
+        }
+        self._state["attack_graph"]["nodes"].append(node)
+        self.save_state()
+        _log.info(
+            f"AttackGraph: added {node_id} (conf={confidence:.2f}, impact={impact})"
+        )
+        return node_id
+
+    def update_attack_node(
+        self, node_id: str, state: str, result_evidence: str
+    ) -> bool:
+        """
+        Update attack node state after exploit attempt.
+        state: 'untried' | 'trying' | 'success' | 'failed'
+        """
+        valid_states = {"untried", "trying", "success", "failed"}
+        if state not in valid_states:
+            _log.warning(f"update_attack_node: invalid state '{state}'")
+            return False
+
+        if "attack_graph" not in self._state:
+            return False
+
+        for node in self._state["attack_graph"]["nodes"]:
+            if node.get("id") == node_id:
+                node["state"] = state
+                node["attempts"].append({
+                    "state": state,
+                    "evidence": result_evidence[:200] if result_evidence else "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                self.save_state()
+                _log.info(f"AttackGraph: {node_id} → {state}")
+                return True
+        return False
+
+    def get_prioritized_nodes(self) -> list[dict]:
+        """
+        Return attack nodes sorted by confidence × impact_weight, untried first.
+        """
+        if "attack_graph" not in self._state:
+            return []
+
+        nodes = self._state["attack_graph"].get("nodes", [])
+        
+        def priority_score(n: dict) -> float:
+            if n.get("state") != "untried":
+                return -1.0  # Already tried → lowest priority
+            conf = float(n.get("confidence", 0))
+            impact = n.get("impact", "info")
+            weight = self._IMPACT_WEIGHTS.get(impact, 0.1)
+            return conf * weight
+
+        return sorted(nodes, key=priority_score, reverse=True)
 
     # ── ChromaDB integration ───────────────────────────────────────────
     def store_in_chroma(self, finding_text: str, metadata: dict):

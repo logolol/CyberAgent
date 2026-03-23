@@ -2876,6 +2876,101 @@ Return JSON:
                 "detail": "WebDAV appears exposed",
             })
 
+        # ── Build AttackGraph from exploitable vulns ──────────────────────
+        # Confidence scoring:
+        #   nuclei confirmed → 1.0
+        #   backdoor pattern match → 0.85
+        #   CVSS >= 9.0 + CVE → 0.8
+        #   CVSS >= 7.0 + CVE → 0.6
+        # Impact mapping:
+        #   bindshell/backdoor → "root"
+        #   vsftpd backdoor → "root"
+        #   Samba usermap → "root"
+        #   distccd → "user"
+        #   MySQL empty root → "service"
+        #   PHP CGI → "user"
+        _IMPACT_MAP = {
+            "bindshell": "root",
+            "vsftpd": "root",
+            "unrealircd": "root",
+            "samba": "root",
+            "smb": "root",
+            "distccd": "user",
+            "mysql": "service",
+            "php": "user",
+            "http": "user",
+        }
+        target_ip = self._normalize_host_ip(self.target)
+        
+        for vuln in vulnerabilities:
+            if not vuln.get("exploitable"):
+                continue
+            
+            # Determine confidence
+            evidence = vuln.get("evidence", "")
+            title = vuln.get("title", "").lower()
+            cvss = float(vuln.get("cvss_score", 0))
+            cve = vuln.get("cve", "CVE-UNKNOWN")
+            service = vuln.get("service", "unknown").lower()
+            
+            if "nuclei confirmed" in evidence.lower() or vuln.get("confirmed"):
+                confidence = 1.0
+            elif any(kw in title for kw in ["backdoor", "bindshell", "unrealircd"]):
+                confidence = 0.85
+            elif cvss >= 9.0 and cve != "CVE-UNKNOWN":
+                confidence = 0.8
+            elif cvss >= 7.0 and cve != "CVE-UNKNOWN":
+                confidence = 0.6
+            else:
+                confidence = 0.5
+            
+            # Determine impact
+            impact = "user"  # default
+            for svc_key, imp_val in _IMPACT_MAP.items():
+                if svc_key in service or svc_key in title:
+                    impact = imp_val
+                    break
+            # Special backdoor detection
+            if "backdoor" in title or "bindshell" in title:
+                impact = "root"
+            
+            # Find port for this service from extracted ports
+            vuln_port = 0
+            for p in ports:
+                if p.get("service", "").lower() == service:
+                    vuln_port = p.get("port", 0)
+                    break
+            # Fallback port mapping
+            if not vuln_port:
+                _SERVICE_PORTS = {
+                    "ftp": 21, "ssh": 22, "telnet": 23, "smtp": 25,
+                    "http": 80, "smb": 445, "samba": 445, "mysql": 3306,
+                    "distccd": 3632, "irc": 6667,
+                }
+                vuln_port = _SERVICE_PORTS.get(service, 0)
+            
+            version = ""
+            # Try to extract version from evidence/title
+            import re as _re
+            ver_match = _re.search(r'(\d+\.\d+(?:\.\d+)?)', evidence + " " + title)
+            if ver_match:
+                version = ver_match.group(1)
+            
+            # Add to attack graph
+            try:
+                self.memory.add_attack_node(
+                    ip=target_ip,
+                    port=vuln_port,
+                    service=service,
+                    version=version,
+                    cve=cve,
+                    confidence=confidence,
+                    impact=impact,
+                    evidence=evidence[:200] if evidence else title[:100],
+                )
+            except Exception as e:
+                self.log_warning(f"Failed to add attack node: {e}")
+
         return {
             "ports": ports,
             "vulnerabilities": vulnerabilities,
