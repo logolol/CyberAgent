@@ -525,41 +525,81 @@ class BaseAgent:
     def hallucination_guard(self, agent_output: dict, phase: str) -> dict:
         """
         Validate agent output before it reaches MissionMemory.
-        Catches 8 classes of hallucination with multi-source validation. Never raises — always returns dict.
+        Catches 10 classes of hallucination with multi-source validation. Never raises — always returns dict.
 
         Checks:
           1. CVE format — must match CVE-YYYY-NNNNN (year 1999-2026, id 4-7 digits)
           2. CVSS score — must be float 0.0–10.0
-          3. Confirmed without evidence — demote to "potential"
+          3. Confirmed without evidence — demote to "potential" (evidence must be >20 chars)
           4. Vague version string — must look like a real version, not a description
           5. IP address format — must be valid IPv4 dotted-quad
-          6. CVE existence — cross-reference with RAG CVE database
+          6. CVE existence — cross-reference with RAG CVE database + NVD API fallback
           7. Exploit path validation — verify exploit exists in ExploitDB or Metasploit
           8. Command syntax validation — check for common syntax errors in tool commands
+          9. Port range validation — must be 1-65535
+         10. Confidence score validation — must be 0.0-1.0
 
-        Adds _hallucination_flags, _guard_passed, and _validation_sources to output.
+        Adds _hallucination_flags, _guard_passed, _validation_sources, _rejection_count to output.
         """
         import copy
         import ipaddress
+        import urllib.request
+        import ssl
 
         flags: list[str] = []
         validation_sources: list[str] = []
+        rejection_count = 0
         cleaned = copy.deepcopy(agent_output)
+        
+        # Cache for CVE lookups to avoid repeated API calls
+        cve_cache: dict[str, bool] = {}
+
+        def _validate_cve_nvd_api(cve_id: str) -> bool:
+            """Fallback to NVD API for CVE verification."""
+            try:
+                # NVD API v2.0
+                url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers={"User-Agent": "CyberAgent/1.0"})
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+                    data = json.loads(resp.read().decode())
+                    if data.get("totalResults", 0) > 0:
+                        validation_sources.append(f"nvd_api:{cve_id}")
+                        return True
+                return False
+            except Exception:
+                return False
 
         def _validate_cve_exists(cve_id: str) -> bool:
-            """Cross-reference CVE with RAG database."""
-            if cve_id == "CVE-UNKNOWN" or cve_id == "CVE-INVALID-REMOVED":
+            """Cross-reference CVE with RAG database, fallback to NVD API."""
+            if cve_id in ("CVE-UNKNOWN", "CVE-INVALID-REMOVED", "CVE-UNVERIFIED"):
                 return False
+            
+            # Check cache first
+            if cve_id in cve_cache:
+                return cve_cache[cve_id]
+            
+            # Try RAG database first
             try:
                 results = self.chroma.get_rag_context(cve_id, n=3)
                 for r in results:
                     if cve_id.upper() in r.get("text", "").upper():
                         validation_sources.append(f"cve_database:{cve_id}")
+                        cve_cache[cve_id] = True
                         return True
-                flags.append(f"cve_not_found_in_database:{cve_id}")
-                return False
             except Exception:
-                return False
+                pass
+            
+            # Fallback to NVD API (rate-limited, so only for misses)
+            if _validate_cve_nvd_api(cve_id):
+                cve_cache[cve_id] = True
+                return True
+            
+            flags.append(f"cve_not_verified:{cve_id}")
+            cve_cache[cve_id] = False
+            return False
 
         def _validate_exploit_path(exploit_path: str) -> bool:
             """Verify exploit exists in ExploitDB or is a valid Metasploit module path."""
@@ -590,7 +630,7 @@ class BaseAgent:
             return False
 
         def _validate_command_syntax(command: str, tool: str = "") -> bool:
-            """Check for common command syntax errors."""
+            """Check for common command syntax errors and injection attempts."""
             if not command or not isinstance(command, str):
                 return True
 
@@ -606,14 +646,47 @@ class BaseAgent:
                 flags.append(f"incomplete_command:{command[:50]}")
                 return False
 
-            # Check for suspicious characters (potential injection)
-            if any(char in command for char in [";rm ", ";curl ", "$(rm ", "`rm "]):
-                flags.append(f"suspicious_command_pattern:{command[:50]}")
-                return False
+            # Expanded injection detection patterns
+            injection_patterns = [
+                r";.*rm\s+-",        # ;rm -rf
+                r";.*curl\s+",       # ;curl download
+                r"\$\(.*rm\s",       # $(rm
+                r"`.*rm\s",          # `rm
+                r";\s*wget\s+",      # ;wget
+                r";\s*chmod\s+",     # ;chmod
+                r";\s*mkfs\s+",      # ;mkfs
+                r";\s*dd\s+if=",     # ;dd
+                r"\|\s*sh\b",        # | sh
+                r"\|\s*bash\b",      # | bash
+                r";\s*python.*-c",   # ;python -c
+                r";\s*perl.*-e",     # ;perl -e
+                r"base64\s+-d\s*\|", # base64 -d | (decode & exec)
+            ]
+            for pattern in injection_patterns:
+                if re.search(pattern, command, re.IGNORECASE):
+                    flags.append(f"injection_pattern_detected:{command[:50]}")
+                    return False
 
+            return True
+        
+        def _validate_evidence(evidence: str) -> bool:
+            """Validate evidence is substantive, not just placeholder."""
+            if not evidence or not isinstance(evidence, str):
+                return False
+            evidence = evidence.strip()
+            # Must be at least 20 chars and not just generic phrases
+            if len(evidence) < 20:
+                return False
+            generic_phrases = [
+                "confirmed", "verified", "found", "detected", "true", 
+                "yes", "present", "exists", "vulnerable", "exploitable"
+            ]
+            if evidence.lower() in generic_phrases:
+                return False
             return True
 
         def _check_dict(obj: Any):
+            nonlocal rejection_count
             if not isinstance(obj, dict):
                 return
             for k, v in list(obj.items()):
@@ -623,12 +696,14 @@ class BaseAgent:
                         if not re.match(r"^CVE-\d{4}-\d{4,7}$", cve.upper()):
                             obj[k] = v.replace(cve, "CVE-INVALID-REMOVED")
                             flags.append(f"invalid_cve_format:{cve}")
+                            rejection_count += 1
                 elif k in ("cve",) and v is not None and isinstance(v, str):
-                    if v != "CVE-UNKNOWN" and not re.match(r"^CVE-\d{4}-\d{4,7}$", v):
+                    if v not in ("CVE-UNKNOWN", "CVE-UNVERIFIED") and not re.match(r"^CVE-\d{4}-\d{4,7}$", v):
                         obj[k] = "CVE-INVALID-REMOVED"
                         flags.append(f"invalid_cve_format:{v}")
-                    # CHECK 6 — CVE existence validation
-                    elif v != "CVE-UNKNOWN" and v != "CVE-INVALID-REMOVED":
+                        rejection_count += 1
+                    # CHECK 6 — CVE existence validation with NVD fallback
+                    elif v not in ("CVE-UNKNOWN", "CVE-INVALID-REMOVED", "CVE-UNVERIFIED"):
                         if not _validate_cve_exists(v):
                             obj[k] = "CVE-UNVERIFIED"
                             obj["requires_verification"] = True
@@ -640,9 +715,11 @@ class BaseAgent:
                         if not (0.0 <= score <= 10.0):
                             obj[k] = None
                             flags.append(f"invalid_cvss:{v}")
+                            rejection_count += 1
                     except (TypeError, ValueError):
                         obj[k] = None
                         flags.append(f"invalid_cvss:{v}")
+                        rejection_count += 1
 
                 # CHECK 4 — version string sanity (≤4 words → likely real version)
                 if k in ("version", "service_version", "ver") and isinstance(v, str) and v:
@@ -651,13 +728,14 @@ class BaseAgent:
                         flags.append(f"vague_version_string:{v[:50]}")
 
                 # CHECK 5 — IP address
-                if k in ("ip", "host") and isinstance(v, str) and v:
+                if k in ("ip", "host", "target", "rhost") and isinstance(v, str) and v:
                     if re.match(r"^\d+\.\d+\.\d+\.\d+$", v):
                         try:
                             ipaddress.ip_address(v)
                         except ValueError:
                             del obj[k]
                             flags.append(f"invalid_ip:{v}")
+                            rejection_count += 1
 
                 # CHECK 7 — Exploit path validation
                 if k in ("exploit_path", "exploit_module", "module_path") and isinstance(v, str):
@@ -666,6 +744,27 @@ class BaseAgent:
                 # CHECK 8 — Command syntax validation
                 if k in ("command", "cmd", "tool_command") and isinstance(v, str):
                     _validate_command_syntax(v, obj.get("tool", ""))
+                
+                # CHECK 9 — Port range validation
+                if k in ("port", "lport", "rport", "shell_port") and v is not None:
+                    try:
+                        port = int(v)
+                        if not (1 <= port <= 65535):
+                            obj[k] = None
+                            flags.append(f"invalid_port:{v}")
+                            rejection_count += 1
+                    except (TypeError, ValueError):
+                        pass
+                
+                # CHECK 10 — Confidence score validation
+                if k in ("confidence", "conf", "score") and v is not None:
+                    try:
+                        conf = float(v)
+                        if not (0.0 <= conf <= 1.0):
+                            obj[k] = max(0.0, min(1.0, conf))  # Clamp to valid range
+                            flags.append(f"confidence_clamped:{v}")
+                    except (TypeError, ValueError):
+                        pass
 
                 # Recurse
                 if isinstance(v, dict):
@@ -674,15 +773,17 @@ class BaseAgent:
                     _check_list(v)
 
         def _check_list(lst: list):
+            nonlocal rejection_count
             for item in lst:
                 if isinstance(item, dict):
-                    # CHECK 3 — confirmed without evidence
+                    # CHECK 3 — confirmed without SUBSTANTIVE evidence
                     if item.get("confirmed") is True:
                         evidence = item.get("evidence", "")
-                        if not (isinstance(evidence, str) and evidence.strip()):
+                        if not _validate_evidence(evidence):
                             item["confirmed"] = False
                             item["potential"] = True
                             flags.append("unconfirmed_finding_demoted")
+                            rejection_count += 1
                     _check_dict(item)
                 elif isinstance(item, list):
                     _check_list(item)
@@ -697,9 +798,10 @@ class BaseAgent:
         cleaned["_hallucination_flags"] = flags
         cleaned["_guard_passed"] = len(flags) == 0
         cleaned["_validation_sources"] = validation_sources
+        cleaned["_rejection_count"] = rejection_count
 
         if flags:
-            self.log_warning(f"Hallucination guard: {len(flags)} issue(s) — {flags}")
+            self.log_warning(f"Hallucination guard: {len(flags)} issue(s), {rejection_count} rejected — {flags[:5]}")
         if validation_sources:
             self.log_info(f"Validated against {len(validation_sources)} external source(s)")
 

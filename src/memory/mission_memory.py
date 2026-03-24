@@ -454,6 +454,140 @@ class MissionMemory:
         else:
             self.add_note(str(data))
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # LEARNING SYSTEM — Track successful techniques for cross-mission intelligence
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    def record_technique_success(
+        self,
+        technique_type: str,  # "exploit", "privesc", "enum", "credential"
+        service: str,
+        version: str,
+        tool: str,
+        cve: str = "",
+        confidence_boost: float = 0.1,
+        notes: str = "",
+    ):
+        """Record a successful technique for learning."""
+        if "learning" not in self._state:
+            self._state["learning"] = {
+                "successful_techniques": [],
+                "failed_techniques": [],
+                "service_patterns": {},
+            }
+        
+        entry = {
+            "type": technique_type,
+            "service": service,
+            "version": version,
+            "tool": tool,
+            "cve": cve,
+            "success": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "notes": notes,
+        }
+        self._state["learning"]["successful_techniques"].append(entry)
+        
+        # Update service pattern confidence
+        svc_key = f"{service}:{version[:20]}" if version else service
+        if svc_key not in self._state["learning"]["service_patterns"]:
+            self._state["learning"]["service_patterns"][svc_key] = {
+                "successes": 0,
+                "failures": 0,
+                "best_tool": None,
+                "confidence": 0.5,
+            }
+        
+        pattern = self._state["learning"]["service_patterns"][svc_key]
+        pattern["successes"] += 1
+        pattern["best_tool"] = tool
+        pattern["confidence"] = min(1.0, pattern["confidence"] + confidence_boost)
+        
+        self.save_state()
+        _log.info(f"Learning: recorded success for {service} using {tool}")
+    
+    def record_technique_failure(
+        self,
+        technique_type: str,
+        service: str,
+        version: str,
+        tool: str,
+        cve: str = "",
+        error: str = "",
+    ):
+        """Record a failed technique to avoid repeating."""
+        if "learning" not in self._state:
+            self._state["learning"] = {
+                "successful_techniques": [],
+                "failed_techniques": [],
+                "service_patterns": {},
+            }
+        
+        entry = {
+            "type": technique_type,
+            "service": service,
+            "version": version,
+            "tool": tool,
+            "cve": cve,
+            "success": False,
+            "error": error[:200],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._state["learning"]["failed_techniques"].append(entry)
+        
+        # Update service pattern confidence
+        svc_key = f"{service}:{version[:20]}" if version else service
+        if svc_key not in self._state["learning"]["service_patterns"]:
+            self._state["learning"]["service_patterns"][svc_key] = {
+                "successes": 0,
+                "failures": 0,
+                "best_tool": None,
+                "confidence": 0.5,
+            }
+        
+        pattern = self._state["learning"]["service_patterns"][svc_key]
+        pattern["failures"] += 1
+        pattern["confidence"] = max(0.1, pattern["confidence"] - 0.05)
+        
+        self.save_state()
+    
+    def get_technique_recommendation(self, service: str, version: str = "") -> dict:
+        """Get recommended technique based on learning history."""
+        if "learning" not in self._state:
+            return {"recommended_tool": None, "confidence": 0.5, "history": []}
+        
+        svc_key = f"{service}:{version[:20]}" if version else service
+        pattern = self._state["learning"]["service_patterns"].get(svc_key, {})
+        
+        # Find historical successes for this service
+        successes = [
+            t for t in self._state["learning"]["successful_techniques"]
+            if t["service"] == service
+        ]
+        
+        return {
+            "recommended_tool": pattern.get("best_tool"),
+            "confidence": pattern.get("confidence", 0.5),
+            "successes": pattern.get("successes", 0),
+            "failures": pattern.get("failures", 0),
+            "history": successes[-5:],  # Last 5 successes
+        }
+    
+    def should_skip_technique(self, service: str, tool: str, cve: str = "") -> bool:
+        """Check if a technique failed recently and should be skipped."""
+        if "learning" not in self._state:
+            return False
+        
+        # Check recent failures (last 10)
+        recent_failures = self._state["learning"]["failed_techniques"][-10:]
+        for failure in recent_failures:
+            if (failure["service"] == service and 
+                failure["tool"] == tool and
+                (not cve or failure.get("cve") == cve)):
+                return True
+        
+        return False
+
 
 if __name__ == "__main__":
     from rich.console import Console

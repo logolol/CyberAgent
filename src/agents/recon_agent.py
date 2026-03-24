@@ -176,11 +176,186 @@ class ReconAgent(BaseAgent):
         },
     }
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ACTIVE SCANNING TOOLS — With Firewall Evasion Options
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    ACTIVE_TOOLS: dict[str, dict[str, Any]] = {
+        # ── Nmap scans with evasion options ──────────────────────────────────
+        "nmap_quick": {
+            "tool": "nmap",
+            "args": ["-T4", "-F", "--open", "{target}"],
+            "purpose": "Quick top-100 port scan",
+            "evasion_variants": {
+                "stealth": ["-sS", "-T2", "-f", "--data-length", "32"],
+                "decoy": ["-D", "RND:5", "-T3"],
+                "fragment": ["-f", "--mtu", "24", "-T3"],
+            },
+        },
+        "nmap_version": {
+            "tool": "nmap",
+            "args": ["-sV", "-sC", "-T4", "--version-intensity", "5", "{target}"],
+            "purpose": "Service version detection with default scripts",
+            "evasion_variants": {
+                "stealth": ["-sV", "-T2", "--version-intensity", "3", "-f"],
+                "slow": ["-sV", "-T1", "--version-intensity", "2", "--max-retries", "2"],
+            },
+        },
+        "nmap_full": {
+            "tool": "nmap",
+            "args": ["-sV", "-sC", "-p-", "-T4", "--open", "{target}"],
+            "purpose": "Full port scan with version detection",
+            "timeout": 600,
+        },
+        "nmap_udp": {
+            "tool": "nmap",
+            "args": ["-sU", "-T4", "--top-ports", "100", "{target}"],
+            "purpose": "UDP port scan (requires root)",
+            "requires_root": True,
+        },
+        "nmap_vuln": {
+            "tool": "nmap",
+            "args": ["--script", "vuln", "-T4", "{target}"],
+            "purpose": "Nmap vulnerability scan scripts",
+        },
+        "nmap_smb": {
+            "tool": "nmap",
+            "args": ["--script", "smb-enum-shares,smb-enum-users,smb-os-discovery", "-p", "139,445", "{target}"],
+            "purpose": "SMB enumeration via nmap scripts",
+        },
+        
+        # ── Web vulnerability scanning ───────────────────────────────────────
+        "nikto_scan": {
+            "tool": "nikto",
+            "args": ["-h", "http://{target}", "-C", "all", "-Tuning", "123bde"],
+            "purpose": "Web vulnerability scanner",
+            "timeout": 300,
+            "evasion_variants": {
+                "stealth": ["-h", "http://{target}", "-evasion", "1234567"],  # All evasion techniques
+            },
+        },
+        "dirb_scan": {
+            "tool": "dirb",
+            "args": ["http://{target}", "/usr/share/wordlists/dirb/common.txt", "-w", "-S"],
+            "purpose": "Directory brute-force",
+            "timeout": 180,
+        },
+        "gobuster_dir": {
+            "tool": "gobuster",
+            "args": ["dir", "-u", "http://{target}", "-w", "/usr/share/wordlists/dirb/common.txt", "-q", "-t", "20"],
+            "purpose": "Fast directory enumeration",
+            "timeout": 180,
+        },
+        "wfuzz_dirs": {
+            "tool": "wfuzz",
+            "args": ["-c", "-z", "file,/usr/share/wordlists/dirb/common.txt", "--hc", "404", "http://{target}/FUZZ"],
+            "purpose": "Fuzzing for directories",
+            "timeout": 180,
+        },
+        
+        # ── SMB/NetBIOS enumeration ──────────────────────────────────────────
+        "enum4linux_full": {
+            "tool": "enum4linux",
+            "args": ["-a", "{target}"],
+            "purpose": "Full SMB/Samba enumeration",
+            "timeout": 120,
+        },
+        "smbclient_list": {
+            "tool": "smbclient",
+            "args": ["-N", "-L", "//{target}"],
+            "purpose": "List SMB shares anonymously",
+        },
+        "smbmap_scan": {
+            "tool": "smbmap",
+            "args": ["-H", "{target}"],
+            "purpose": "SMB share permissions enumeration",
+        },
+        "rpcclient_enum": {
+            "tool": "rpcclient",
+            "args": ["-U", "", "-N", "{target}", "-c", "enumdomusers"],
+            "purpose": "RPC user enumeration",
+        },
+        
+        # ── SNMP enumeration ─────────────────────────────────────────────────
+        "snmpwalk_public": {
+            "tool": "snmpwalk",
+            "args": ["-v", "2c", "-c", "public", "{target}"],
+            "purpose": "SNMP walk with public community",
+            "timeout": 60,
+        },
+        "snmp_check": {
+            "tool": "snmp-check",
+            "args": ["{target}", "-c", "public"],
+            "purpose": "SNMP enumeration",
+        },
+        
+        # ── Database enumeration ─────────────────────────────────────────────
+        "mysql_anon": {
+            "tool": "mysql",
+            "args": ["-h", "{target}", "-u", "root", "--password=", "-e", "SHOW DATABASES;"],
+            "purpose": "MySQL anonymous/empty password check",
+        },
+        "psql_anon": {
+            "tool": "psql",
+            "args": ["-h", "{target}", "-U", "postgres", "-c", "\\l"],
+            "purpose": "PostgreSQL anonymous check",
+        },
+        
+        # ── LDAP enumeration ─────────────────────────────────────────────────
+        "ldapsearch_anon": {
+            "tool": "ldapsearch",
+            "args": ["-x", "-H", "ldap://{target}", "-b", "", "-s", "base", "namingContexts"],
+            "purpose": "LDAP anonymous bind check",
+        },
+        
+        # ── SSH enumeration ──────────────────────────────────────────────────
+        "ssh_audit": {
+            "tool": "ssh-audit",
+            "args": ["{target}"],
+            "purpose": "SSH configuration audit",
+        },
+    }
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FIREWALL EVASION PROFILES
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    EVASION_PROFILES: dict[str, dict[str, Any]] = {
+        "none": {
+            "nmap_timing": "-T4",
+            "nmap_extra": [],
+            "request_delay": 0,
+        },
+        "light": {
+            "nmap_timing": "-T3",
+            "nmap_extra": ["--max-retries", "2"],
+            "request_delay": 0.5,
+        },
+        "medium": {
+            "nmap_timing": "-T2",
+            "nmap_extra": ["-f", "--data-length", "32"],
+            "request_delay": 1,
+        },
+        "heavy": {
+            "nmap_timing": "-T1",
+            "nmap_extra": ["-f", "--mtu", "24", "-D", "RND:3", "--source-port", "53"],
+            "request_delay": 2,
+        },
+        "paranoid": {
+            "nmap_timing": "-T0",
+            "nmap_extra": ["-f", "--mtu", "16", "-D", "RND:5,ME", "--source-port", "53", "--randomize-hosts"],
+            "request_delay": 5,
+        },
+    }
+
     WAVE_1_TOOLS = ["dns_resolve", "dns_all_records", "whois_domain", "cert_transparency", "security_headers"]
+    # Wave 2 adds active scanning based on target type
+    WAVE_2_ACTIVE = ["nmap_quick", "nmap_version", "nikto_scan", "enum4linux_full"]
     MAX_WAVES = 3
     MAX_CONCURRENT = 5
     DEFAULT_TOOL_TIMEOUT = 30
     TOOL_TIMEOUTS: dict[str, int] = {
+        # Passive tools
         "dns_resolve": 10,
         "dns_all_records": 10,
         "reverse_dns": 10,
@@ -204,6 +379,27 @@ class ReconAgent(BaseAgent):
         "theharvester_ddg": 60,
         "theharvester_bing": 60,
         "amass_passive": 60,
+        # Active tools
+        "nmap_quick": 60,
+        "nmap_version": 180,
+        "nmap_full": 600,
+        "nmap_udp": 300,
+        "nmap_vuln": 300,
+        "nmap_smb": 60,
+        "nikto_scan": 300,
+        "dirb_scan": 180,
+        "gobuster_dir": 180,
+        "wfuzz_dirs": 180,
+        "enum4linux_full": 120,
+        "smbclient_list": 30,
+        "smbmap_scan": 60,
+        "rpcclient_enum": 30,
+        "snmpwalk_public": 60,
+        "snmp_check": 60,
+        "mysql_anon": 15,
+        "psql_anon": 15,
+        "ldapsearch_anon": 15,
+        "ssh_audit": 30,
     }
     OUTPUT_TRUNCATE = 2000
 
@@ -222,9 +418,16 @@ class ReconAgent(BaseAgent):
         self.resolved_ip: str | None = None
         self.all_raw_outputs: dict[str, str] = {}
         self.all_findings: dict[str, Any] = {}
+        self.evasion_profile = "none"  # Can be: none, light, medium, heavy, paranoid
+        
+        # Build combined tool registry (passive + active)
         self.tool_specs: dict[str, dict[str, Any]] = {
             name: dict(spec) for name, spec in self.PASSIVE_TOOLS.items()
         }
+        self.tool_specs.update({
+            name: dict(spec) for name, spec in self.ACTIVE_TOOLS.items()
+        })
+        
         self.available_tools: dict[str, bool] = {}
         self._register_optional_tools()
         self._build_available_tools_registry()
