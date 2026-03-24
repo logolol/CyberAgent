@@ -1332,6 +1332,9 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             return tool_name, f"[TOOL_NOT_EXECUTABLE: {tool_name}]"
 
         args = [str(a) for a in (resolved_args or [self.target])]
+        
+        # VERBOSE: Log tool call before execution
+        self._verbose_tool_call(tool_name, args)
 
         result = self.tools.use(
             tool_name=tool_name,
@@ -1345,6 +1348,9 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             or result.get("stderr", "")
             or "[no output]"
         )
+        
+        # VERBOSE: Log tool output
+        self._verbose_tool_output(output)
 
         self.memory.log_action(
             agent_name="EnumVulnAgent",

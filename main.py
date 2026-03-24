@@ -4,11 +4,13 @@ CyberAgent — Autonomous Multi-Agent Pentest Platform
 Entry point. Run with:
     python3 main.py --target <ip_or_domain> [--phase full]
     python3 main.py --target 192.168.1.1 --phase recon
+    python3 main.py --target 192.168.1.1 --verbose
     python3 main.py --resume <mission_id>
     python3 main.py --report-only <mission_id>
 """
 
 import argparse
+import os
 import signal
 import sys
 from pathlib import Path
@@ -80,7 +82,17 @@ def main():
         dest="report_only",
         help="Generate report from a saved mission state (no new scanning)",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose mode: print all LLM prompts/responses and tool calls",
+    )
     args = parser.parse_args()
+
+    # ── Set VERBOSE mode via environment variable ─────────────────────────────
+    if args.verbose:
+        os.environ['CA_VERBOSE'] = '1'
+        console.print("[yellow]🔍 VERBOSE MODE ENABLED[/] - All LLM and tool calls will be logged")
 
     # Validate arguments
     if not args.target and not args.resume and not args.report_only:

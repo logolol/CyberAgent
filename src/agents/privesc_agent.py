@@ -810,6 +810,9 @@ class PrivEscAgent(BaseAgent):
         import socket
         import time
         
+        # VERBOSE: Log tool call
+        self._verbose_tool_call("shell_cmd", [f"nc {target}:{shell_port}", f"input: {command}"])
+        
         try:
             # Use socket for better bindshell compatibility
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -841,6 +844,9 @@ class PrivEscAgent(BaseAgent):
             lines = output.split("\n")
             if lines and command[:20] in lines[0]:
                 output = "\n".join(lines[1:])
+            
+            # VERBOSE: Log shell output
+            self._verbose_shell_output(output.strip())
             
             return output.strip()
 

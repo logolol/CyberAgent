@@ -611,6 +611,11 @@ class OrchestratorAgent(BaseAgent):
             except ValueError as e:
                 self.log_warning(f"update_phase({mm_phase}) skipped: {e}")
 
+            # VERBOSE: Log phase transition with intelligence passed
+            prev_phase = phases[phases.index(phase_name) - 1] if phases.index(phase_name) > 0 else "init"
+            intel_summary = json.dumps(briefing, default=str)[:200] if briefing else "none"
+            self._verbose_phase_transition(prev_phase, phase_name, intel_summary)
+
             # Instantiate and run specialist agent
             agent = self._get_agent(phase_name)
             self.log_info(f"Delegating to {agent.agent_name} for phase '{phase_name}'...")

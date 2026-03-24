@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -40,6 +41,11 @@ from prompts.agent_prompts import get_agent_prompt, AGENT_PROMPTS
 _log = logging.getLogger(__name__)
 
 
+def is_verbose() -> bool:
+    """Check if verbose mode is enabled via CA_VERBOSE env var."""
+    return os.environ.get('CA_VERBOSE') == '1'
+
+
 class BaseAgent:
     """
     Parent class for every CyberAgent specialist.
@@ -63,6 +69,72 @@ class BaseAgent:
         self.console = Console()
         self.logger = logging.getLogger(f"agent.{agent_name}")
         self.max_iterations = max_react_iterations
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # VERBOSE LOGGING HELPERS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _verbose(self, action: str, message: str) -> None:
+        """Print verbose log line if CA_VERBOSE is set."""
+        if is_verbose():
+            self.console.print(
+                f"[dim cyan][VERBOSE][{self.agent_name}][{action}][/] {message}"
+            )
+
+    def _verbose_tool_call(self, tool: str, args: list | str) -> None:
+        """Log tool call before execution."""
+        if is_verbose():
+            args_str = ' '.join(str(a) for a in args) if isinstance(args, list) else str(args)
+            self._verbose("TOOL_CALL", f"{tool} {args_str[:400]}")
+
+    def _verbose_tool_output(self, output: str) -> None:
+        """Log tool output after execution."""
+        if is_verbose():
+            self._verbose("TOOL_OUTPUT", output[:500].replace('\n', ' '))
+
+    def _verbose_llm_prompt(self, prompt: str) -> None:
+        """Log LLM prompt before call."""
+        if is_verbose():
+            self._verbose("LLM_PROMPT", prompt[:300].replace('\n', ' '))
+
+    def _verbose_llm_response(self, response: str) -> None:
+        """Log LLM response after call."""
+        if is_verbose():
+            self._verbose("LLM_RESPONSE", response[:300].replace('\n', ' '))
+
+    def _verbose_llm_timeout(self, timeout_secs: int) -> None:
+        """Log LLM timeout."""
+        if is_verbose():
+            self._verbose("LLM_TIMEOUT", f"timed out after {timeout_secs}s")
+
+    def _verbose_attack_graph(self, nodes: list[dict]) -> None:
+        """Log all attack graph nodes."""
+        if is_verbose():
+            self._verbose("ATTACK_GRAPH", f"{len(nodes)} nodes:")
+            for n in nodes:
+                self._verbose(
+                    "ATTACK_GRAPH",
+                    f"  {n.get('cve', 'CVE-UNKNOWN')} on {n.get('ip')}:{n.get('port')} "
+                    f"state={n.get('state')} confidence={n.get('confidence', 0):.2f}"
+                )
+
+    def _verbose_shell_output(self, output: str) -> None:
+        """Log shell command output."""
+        if is_verbose():
+            self._verbose("SHELL_OUTPUT", output[:500].replace('\n', ' | '))
+
+    def _verbose_credential(self, username: str, password: str, service: str) -> None:
+        """Log found credential."""
+        if is_verbose():
+            self._verbose("CREDENTIAL", f"{username}:{password} on {service}")
+
+    def _verbose_phase_transition(self, from_phase: str, to_phase: str, intel: str) -> None:
+        """Log phase transition with intelligence passed."""
+        if is_verbose():
+            self._verbose(
+                "PHASE_TRANSITION",
+                f"{from_phase} → {to_phase} | Intel: {intel[:200]}"
+            )
 
     # ── Prompt helpers ────────────────────────────────────────────────────────
 
@@ -850,6 +922,9 @@ class BaseAgent:
         import weakref
         import concurrent.futures.thread
 
+        # VERBOSE: Log prompt before LLM call
+        self._verbose_llm_prompt(prompt)
+
         class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
             def _adjust_thread_count(self):
                 if self._idle_semaphore.acquire(timeout=0):
@@ -875,13 +950,18 @@ class BaseAgent:
         future = ex.submit(self.llm.invoke, prompt)
         try:
             response = future.result(timeout=timeout)
-            return (response.content
+            result = (response.content
                     if hasattr(response, "content")
                     else str(response))
+            # VERBOSE: Log response after LLM call
+            self._verbose_llm_response(result)
+            return result
         except concurrent.futures.TimeoutError:
             self.log_warning(
                 f"LLM decision timed out after {timeout}s"
             )
+            # VERBOSE: Log timeout
+            self._verbose_llm_timeout(timeout)
             future.cancel()
             return ""
         except Exception as e:

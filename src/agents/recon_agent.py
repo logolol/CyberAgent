@@ -623,6 +623,10 @@ class ReconAgent(BaseAgent):
 
         args = self._render_args(spec.get("args", []))
         timeout = self.TOOL_TIMEOUTS.get(tool_name, self.DEFAULT_TOOL_TIMEOUT)
+        
+        # VERBOSE: Log tool call before execution
+        self._verbose_tool_call(binary, args)
+        
         result = self.tools.use(
             binary,
             args=args,
@@ -642,6 +646,10 @@ class ReconAgent(BaseAgent):
                 self.log_warning(f"{tool_name} failed: {error}")
 
         output = output[:self.OUTPUT_TRUNCATE]
+        
+        # VERBOSE: Log tool output
+        self._verbose_tool_output(output)
+        
         self.memory.log_action(self.agent_name, tool_name, output[:200])
         return output
 
@@ -834,6 +842,9 @@ Return JSON ONLY:
         Returns raw string response or "" on timeout/error.
         """
         import concurrent.futures as _cf
+        
+        # VERBOSE: Log prompt before LLM call
+        self._verbose_llm_prompt(prompt)
 
         class _DaemonThreadPoolExecutor(_cf.ThreadPoolExecutor):
             """ThreadPoolExecutor variant whose workers are daemonized."""
@@ -867,9 +878,14 @@ Return JSON ONLY:
         future = ex.submit(self.llm.invoke, prompt)
         try:
             response = future.result(timeout=timeout)
-            return response.content if hasattr(response, "content") else str(response)
+            result = response.content if hasattr(response, "content") else str(response)
+            # VERBOSE: Log response
+            self._verbose_llm_response(result)
+            return result
         except _cf.TimeoutError:
             self.log_warning(f"LLM decision timed out after {timeout}s — using heuristic fallback")
+            # VERBOSE: Log timeout
+            self._verbose_llm_timeout(timeout)
             future.cancel()
             return ""
         except Exception as e:
