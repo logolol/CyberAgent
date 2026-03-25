@@ -768,7 +768,7 @@ Return JSON only:
 
 Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
-        raw = self._llm_with_timeout(prompt, timeout=90)
+        raw = self._llm_with_timeout(prompt, timeout=120)
         decision = self._extract_json_robust(raw)
 
         if not decision or not decision.get("tool_batch"):
@@ -1070,7 +1070,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"mitre_techniques":["T1046"],"expected_findings":"string","risk_level":"high|medium|low|unknown"}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=90)
+        raw = self._llm_with_timeout(prompt, timeout=120)
         plan = self._extract_json_robust(raw)
 
         if not plan:
@@ -1207,7 +1207,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_hypotheses":["string"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=90)
+        raw = self._llm_with_timeout(prompt, timeout=120)
         decision = self._extract_json_robust(raw) if raw else None
         if not decision:
             fallback_specs = self._fallback_tool_batch()
@@ -1549,7 +1549,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_attack_vectors":["string"],"open_questions":["string"],"mitre_techniques_observed":["T1046"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=90)
+        raw = self._llm_with_timeout(prompt, timeout=120)
         analysis = self._extract_json_robust(raw)
 
         if not analysis:
@@ -1629,7 +1629,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 '"remediation":"string"}'
             )
 
-            raw = self._llm_with_timeout(classify_prompt, timeout=90)
+            raw = self._llm_with_timeout(classify_prompt, timeout=120)
             vuln = self._extract_json_robust(raw)
 
             if not vuln:
@@ -2061,7 +2061,7 @@ Return JSON:
   "exploitation_guidance": "overall strategy for next phase"
 }}"""
 
-            raw = self._llm_with_timeout(critical_path_prompt, timeout=90)
+            raw = self._llm_with_timeout(critical_path_prompt, timeout=120)
             attack_summary = self._extract_json_robust(raw) or {}
 
         result = {

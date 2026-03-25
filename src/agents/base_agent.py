@@ -921,14 +921,32 @@ class BaseAgent:
         - Warm models take 20-40s for complex prompts with large context
         - Cold starts can take 60-120s (model loading from disk)
         - Better to complete slowly than fail with empty fallback
+        
+        Now includes model keep-alive ping to prevent cold starts.
         """
         import concurrent.futures
         import threading
         import weakref
         import concurrent.futures.thread
+        import time
 
         # VERBOSE: Log prompt before LLM call
         self._verbose_llm_prompt(prompt)
+        
+        # Keep-alive ping: Send minimal request to ensure model is loaded
+        # This prevents cold start timeouts when model was idle during tool execution
+        try:
+            import ollama
+            client = ollama.Client(host="http://localhost:11434")
+            model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
+            client.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": "ping"}],
+                options={"num_predict": 1, "temperature": 0.0},
+                keep_alive="2h",
+            )
+        except Exception:
+            pass  # Ping failed, proceed anyway - main call might still work
 
         class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
             def _adjust_thread_count(self):

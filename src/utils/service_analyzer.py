@@ -481,10 +481,12 @@ REASONING: [2-3 sentences explaining your analysis]
         
         for collection in collections:
             try:
+                # semantic_search returns list[dict] with keys: text, metadata, distance
                 results = self.chroma.semantic_search(collection, query, n_results=3)
                 
-                if results and results.get("documents") and results["documents"][0]:
-                    for doc in results["documents"][0]:
+                if results:  # results is a list of dicts
+                    for hit in results:
+                        doc = hit.get("text", "")
                         # Extract service names from text
                         service_names = self._extract_service_names(doc)
                         similar.extend(service_names)
@@ -754,11 +756,13 @@ EXPLOITATION_APPROACH: [2-3 sentences on recommended approach]
         
         for collection in collections:
             try:
+                # semantic_search returns list[dict] with keys: text, metadata, distance
                 results = self.chroma.semantic_search(collection, query, n_results=5)
                 
-                if results and results.get("documents") and results["documents"][0]:
-                    for idx, doc in enumerate(results["documents"][0]):
-                        metadata = results["metadatas"][0][idx] if results.get("metadatas") else {}
+                if results:  # results is a list of dicts
+                    for hit in results:
+                        doc = hit.get("text", "")
+                        metadata = hit.get("metadata", {})
                         
                         vuln = {
                             "source": collection,
