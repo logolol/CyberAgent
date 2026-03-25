@@ -89,8 +89,8 @@ def get_llm(role: Literal["default", "reasoning"] = "default"):
         temperature=temperature,
         num_ctx=num_ctx,
         keep_alive="2h",  # Keep model loaded for 2 hours between calls
-        # HTTP client timeout — prevents stuck requests when Ollama is overloaded
-        client_kwargs={"timeout": 120.0},  # 2 minutes max per request
+        # HTTP client timeout — must be >= thread timeout (180s) to avoid premature cancellation
+        client_kwargs={"timeout": 300.0},  # 5 minutes max per request
     )
     if num_predict is not None:
         kwargs["num_predict"] = num_predict

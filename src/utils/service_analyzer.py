@@ -360,21 +360,8 @@ REASONING: [2-3 sentences explaining your analysis]
         
         return ""
     
-    def _query_llm(self, prompt: str, timeout: int = 60) -> str:
-        """Query LLM with timeout protection"""
-        
-        # Send keep-alive ping to ensure model is loaded
-        try:
-            import ollama
-            model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
-            ollama.Client(host="http://localhost:11434").chat(
-                model=model_name,
-                messages=[{"role": "user", "content": "ping"}],
-                options={"num_predict": 1, "temperature": 0.0},
-                keep_alive="2h",
-            )
-        except Exception:
-            pass  # Ping failed, proceed anyway
+    def _query_llm(self, prompt: str, timeout: int = 120) -> str:
+        """Query LLM with timeout protection (no ping - warmup handled elsewhere)"""
         
         def _invoke():
             response = self.llm.invoke(prompt)

@@ -910,14 +910,14 @@ class BaseAgent:
         ))
 
     def _llm_with_timeout(
-        self, prompt: str, timeout: int = 90
+        self, prompt: str, timeout: int = 180
     ) -> str:
         """
         Run self.llm.invoke(prompt) with a timeout.
         Returns raw response string or empty string on failure.
         Safe to call from any agent that inherits BaseAgent.
         
-        Default timeout increased to 90s because:
+        Default timeout increased to 180s because:
         - Warm models take 20-40s for complex prompts with large context
         - Cold starts can take 60-120s (model loading from disk)
         - Better to complete slowly than fail with empty fallback
@@ -933,29 +933,8 @@ class BaseAgent:
         # VERBOSE: Log prompt before LLM call
         self._verbose_llm_prompt(prompt)
         
-        # Keep-alive ping: Send minimal request to ensure model is loaded
-        # This prevents cold start timeouts when model was idle during tool execution
-        # Use a short timeout for the ping itself to avoid blocking
-        def _warmup_ping():
-            try:
-                import ollama
-                client = ollama.Client(host="http://localhost:11434")
-                model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
-                client.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": "ping"}],
-                    options={"num_predict": 1, "temperature": 0.0},
-                    keep_alive="2h",
-                )
-                return True
-            except Exception:
-                return False
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ping_ex:
-            try:
-                ping_ex.submit(_warmup_ping).result(timeout=30)  # 30s max for warmup
-            except Exception:
-                pass  # Ping timed out or failed, proceed anyway
+        # Note: Model warmup is handled by llm_factory.warm_model() at startup
+        # We skip ping here to avoid blocking - keep_alive="2h" in LLM config suffices
 
         class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
             def _adjust_thread_count(self):
