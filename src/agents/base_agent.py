@@ -935,18 +935,27 @@ class BaseAgent:
         
         # Keep-alive ping: Send minimal request to ensure model is loaded
         # This prevents cold start timeouts when model was idle during tool execution
-        try:
-            import ollama
-            client = ollama.Client(host="http://localhost:11434")
-            model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
-            client.chat(
-                model=model_name,
-                messages=[{"role": "user", "content": "ping"}],
-                options={"num_predict": 1, "temperature": 0.0},
-                keep_alive="2h",
-            )
-        except Exception:
-            pass  # Ping failed, proceed anyway - main call might still work
+        # Use a short timeout for the ping itself to avoid blocking
+        def _warmup_ping():
+            try:
+                import ollama
+                client = ollama.Client(host="http://localhost:11434")
+                model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
+                client.chat(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "ping"}],
+                    options={"num_predict": 1, "temperature": 0.0},
+                    keep_alive="2h",
+                )
+                return True
+            except Exception:
+                return False
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ping_ex:
+            try:
+                ping_ex.submit(_warmup_ping).result(timeout=30)  # 30s max for warmup
+            except Exception:
+                pass  # Ping timed out or failed, proceed anyway
 
         class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
             def _adjust_thread_count(self):

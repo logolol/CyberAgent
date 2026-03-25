@@ -7,6 +7,7 @@ and discovering vulnerabilities through RAG-driven intelligence.
 
 import logging
 import re
+import concurrent.futures
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -359,21 +360,41 @@ REASONING: [2-3 sentences explaining your analysis]
         
         return ""
     
-    def _query_llm(self, prompt: str) -> str:
-        """Query LLM with error handling"""
+    def _query_llm(self, prompt: str, timeout: int = 60) -> str:
+        """Query LLM with timeout protection"""
+        
+        # Send keep-alive ping to ensure model is loaded
         try:
+            import ollama
+            model_name = getattr(self.llm, 'model', 'cyberagent-pentest:14b')
+            ollama.Client(host="http://localhost:11434").chat(
+                model=model_name,
+                messages=[{"role": "user", "content": "ping"}],
+                options={"num_predict": 1, "temperature": 0.0},
+                keep_alive="2h",
+            )
+        except Exception:
+            pass  # Ping failed, proceed anyway
+        
+        def _invoke():
             response = self.llm.invoke(prompt)
-            
             if hasattr(response, 'content'):
                 return response.content
             elif isinstance(response, dict) and 'content' in response:
                 return response['content']
-            else:
-                return str(response)
+            return str(response)
         
-        except Exception as e:
-            logger.error(f"[ServiceAnalyzer] LLM query failed: {e}")
-            raise
+        # Execute with timeout
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_invoke)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"[ServiceAnalyzer] LLM query failed: timed out")
+                raise TimeoutError("timed out")
+            except Exception as e:
+                logger.error(f"[ServiceAnalyzer] LLM query failed: {e}")
+                raise
     
     def _parse_inference_response(self, response: str) -> Dict[str, Any]:
         """Parse LLM inference response"""

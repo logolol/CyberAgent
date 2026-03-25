@@ -768,7 +768,11 @@ Return JSON only:
 
 Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
-        raw = self._llm_with_timeout(prompt, timeout=120)
+        # Explicit model warm before critical LLM call
+        from utils.llm_factory import warm_model
+        warm_model(role="default", keep_alive="2h")
+        
+        raw = self._llm_with_timeout(prompt, timeout=180)
         decision = self._extract_json_robust(raw)
 
         if not decision or not decision.get("tool_batch"):
