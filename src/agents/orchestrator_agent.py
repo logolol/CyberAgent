@@ -363,15 +363,27 @@ class OrchestratorAgent(BaseAgent):
 
         try:
             import ollama as _ollama
-            client = _ollama.Client(host="http://localhost:11434")
-            resp = client.chat(
-                model=params["model"],
-                messages=[
-                    {"role": "user", "content": prompt + json_instruction},
-                ],
-                options=params["options"],
-            )
+            import concurrent.futures
+            
+            def _call_llm():
+                client = _ollama.Client(host="http://localhost:11434")
+                return client.chat(
+                    model=params["model"],
+                    messages=[
+                        {"role": "user", "content": prompt + json_instruction},
+                    ],
+                    options=params["options"],
+                )
+            
+            # Execute with 180s timeout to prevent indefinite hangs
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call_llm)
+                resp = future.result(timeout=180)
+            
             raw = resp["message"]["content"]
+        except concurrent.futures.TimeoutError:
+            self.log_error("Direct LLM call timed out after 180s")
+            return {"error": "llm_timeout", "raw": ""}
         except Exception as e:
             self.log_error(f"Direct LLM call failed: {e}")
             return {"error": "llm_failed", "raw": ""}
