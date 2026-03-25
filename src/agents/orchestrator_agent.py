@@ -460,10 +460,23 @@ class OrchestratorAgent(BaseAgent):
         cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
         cleaned = cleaned.strip()
 
-        # STEP 2 — strip ```json ... ``` fences if present
-        fence_m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", cleaned, re.DOTALL)
+        # STEP 2 — extract from ```json ... ``` fences (greedy to handle nested objects)
+        fence_m = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", cleaned)
         if fence_m:
-            cleaned = fence_m.group(1)
+            try:
+                return json.loads(fence_m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        # Also try array extraction from fence
+        fence_arr = re.search(r"```(?:json)?\s*(\[[\s\S]*\])\s*```", cleaned)
+        if fence_arr:
+            try:
+                parsed = json.loads(fence_arr.group(1))
+                if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+                    return parsed[0]  # Return first dict from array
+            except (json.JSONDecodeError, ValueError):
+                pass
 
         # STEP 3 — try direct parse on stripped text
         try:
@@ -612,7 +625,8 @@ class OrchestratorAgent(BaseAgent):
                 self.log_warning(f"update_phase({mm_phase}) skipped: {e}")
 
             # VERBOSE: Log phase transition with intelligence passed
-            prev_phase = phases[phases.index(phase_name) - 1] if phases.index(phase_name) > 0 else "init"
+            phase_idx = phases_to_run.index(phase_name)
+            prev_phase = phases_to_run[phase_idx - 1] if phase_idx > 0 else "init"
             intel_summary = json.dumps(briefing, default=str)[:200] if briefing else "none"
             self._verbose_phase_transition(prev_phase, phase_name, intel_summary)
 

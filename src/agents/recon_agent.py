@@ -749,7 +749,7 @@ Return JSON ONLY:
 }}
 """
         try:
-            raw = self._llm_with_timeout(prompt, timeout=60)
+            raw = self._llm_with_timeout(prompt, timeout=120)
             if not raw:
                 self.log_warning("LLM unavailable — using heuristic fallback")
                 return self._heuristic_next_wave(wave_num)
@@ -925,17 +925,36 @@ Return JSON ONLY:
         return unique[:self.MAX_CONCURRENT]
 
     def _extract_json_dict(self, text: str) -> dict[str, Any] | None:
-        start = text.find("{")
+        """Extract JSON dict from LLM response, handling markdown fences."""
+        if not text:
+            return None
+        
+        # Strip think tags
+        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
+        
+        # Try extracting from markdown fence first (greedy for nested objects)
+        fence_m = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", cleaned)
+        if fence_m:
+            try:
+                data = json.loads(fence_m.group(1))
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                pass
+        
+        # Fallback to brace matching
+        start = cleaned.find("{")
         if start == -1:
             return None
         depth = 0
-        for idx, char in enumerate(text[start:], start):
+        for idx, char in enumerate(cleaned[start:], start):
             if char == "{":
                 depth += 1
             elif char == "}":
                 depth -= 1
                 if depth == 0:
-                    block = text[start: idx + 1]
+                    block = cleaned[start: idx + 1]
                     try:
                         data = json.loads(block)
                         if isinstance(data, dict):

@@ -1,20 +1,25 @@
 models:
-  # ── Pentest-tuned models (use these for production agents) ──
+  # ── UNIFIED model for ALL agents ──
+  # Using single model to prevent RAM exhaustion from model swapping.
+  # The 14B model handles all tasks: recon, enum, exploitation, AND orchestration.
   default:
     name: cyberagent-pentest:14b
     base_model: qwen2.5:14b-instruct-q4_K_M
-    use_for: [recon, enumeration, vuln_scan, exploitation, post_exploit, reporting]
+    use_for: [recon, enumeration, vuln_scan, exploitation, post_exploit, reporting, orchestrator, privesc]
     temperature: 0.1
     num_ctx: 8192
-    description: "Qwen2.5:14b with expert pentest system prompt — zero hallucination, all phases"
+    description: "Qwen2.5:14b with expert pentest system prompt — unified for all phases"
+  
+  # Reasoning now points to same model (prevents swapping)
   reasoning:
-    name: cyberagent-reasoning:8b
-    base_model: deepseek-r1:8b-llama-distill-q4_K_M
+    name: cyberagent-pentest:14b
+    base_model: qwen2.5:14b-instruct-q4_K_M
     use_for: [orchestrator, privesc, exploit_chaining, report_generation]
     temperature: 0.05
     num_ctx: 8192
-    num_predict: 256
-    description: "DeepSeek-R1:8b with orchestrator reasoning prompt — mission planning, phase transitions"
+    num_predict: 512
+    description: "Same 14B model for reasoning tasks — prevents model swapping"
+  
   embedding:
     name: nomic-embed-text
     use_for: [chromadb_rag]
@@ -26,7 +31,7 @@ models:
     temperature: 0.1
     num_ctx: 8192
   reasoning_base:
-    name: deepseek-r1:8b-llama-distill-q4_K_M
+    name: qwen2.5:14b-instruct-q4_K_M
     use_for: [fallback]
     temperature: 0.05
     num_ctx: 8192

@@ -1070,7 +1070,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"mitre_techniques":["T1046"],"expected_findings":"string","risk_level":"high|medium|low|unknown"}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=45)
+        raw = self._llm_with_timeout(prompt, timeout=90)
         plan = self._extract_json_robust(raw)
 
         if not plan:
@@ -1207,7 +1207,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_hypotheses":["string"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=45)
+        raw = self._llm_with_timeout(prompt, timeout=90)
         decision = self._extract_json_robust(raw) if raw else None
         if not decision:
             fallback_specs = self._fallback_tool_batch()
@@ -1469,7 +1469,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             except Exception:
                 pass  # fall through to LLM resolution below
 
-        raw = self._llm_with_timeout(arg_prompt, timeout=30)
+        raw = self._llm_with_timeout(arg_prompt, timeout=120)
         args = self._extract_args_from_llm(raw, target)
 
         spec["_resolved_args"] = args
@@ -1549,7 +1549,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_attack_vectors":["string"],"open_questions":["string"],"mitre_techniques_observed":["T1046"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=45)
+        raw = self._llm_with_timeout(prompt, timeout=90)
         analysis = self._extract_json_robust(raw)
 
         if not analysis:
@@ -1629,7 +1629,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 '"remediation":"string"}'
             )
 
-            raw = self._llm_with_timeout(classify_prompt, timeout=45)
+            raw = self._llm_with_timeout(classify_prompt, timeout=90)
             vuln = self._extract_json_robust(raw)
 
             if not vuln:
@@ -3009,9 +3009,24 @@ Return JSON:
         cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
         cleaned = cleaned.strip()
 
-        fence_m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", cleaned, re.DOTALL)
+        # Try to extract from markdown code fence (greedy to handle nested braces)
+        fence_m = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", cleaned)
         if fence_m:
-            cleaned = fence_m.group(1)
+            try:
+                parsed = json.loads(fence_m.group(1))
+                return parsed if isinstance(parsed, dict) else None
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        # Also try array extraction from fence
+        fence_arr = re.search(r"```(?:json)?\s*(\[[\s\S]*\])\s*```", cleaned)
+        if fence_arr:
+            try:
+                parsed = json.loads(fence_arr.group(1))
+                if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+                    return parsed[0]  # Return first dict from array
+            except (json.JSONDecodeError, ValueError):
+                pass
 
         try:
             parsed = json.loads(cleaned)

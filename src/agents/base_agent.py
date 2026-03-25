@@ -910,12 +910,17 @@ class BaseAgent:
         ))
 
     def _llm_with_timeout(
-        self, prompt: str, timeout: int = 45
+        self, prompt: str, timeout: int = 90
     ) -> str:
         """
         Run self.llm.invoke(prompt) with a timeout.
         Returns raw response string or empty string on failure.
         Safe to call from any agent that inherits BaseAgent.
+        
+        Default timeout increased to 90s because:
+        - Warm models take 20-40s for complex prompts with large context
+        - Cold starts can take 60-120s (model loading from disk)
+        - Better to complete slowly than fail with empty fallback
         """
         import concurrent.futures
         import threading

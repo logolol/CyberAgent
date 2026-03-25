@@ -83,7 +83,15 @@ def get_llm(role: Literal["default", "reasoning"] = "default"):
     else:
         print(f"[LLMFactory] ⚠ [{role}] → {model} (cross-role fallback)")
 
-    kwargs = dict(model=model, base_url=base_url, temperature=temperature, num_ctx=num_ctx, keep_alive="10m")
+    kwargs = dict(
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        keep_alive="2h",  # Keep model loaded for 2 hours between calls
+        # HTTP client timeout — prevents stuck requests when Ollama is overloaded
+        client_kwargs={"timeout": 120.0},  # 2 minutes max per request
+    )
     if num_predict is not None:
         kwargs["num_predict"] = num_predict
     return OllamaLLM(**kwargs)
@@ -140,7 +148,7 @@ def get_reasoning_llm(task_complexity: str = "medium") -> dict:
     }
 
 
-def warm_model(role: str = "default") -> bool:
+def warm_model(role: str = "default", keep_alive: str = "2h") -> bool:
     """
     Pre-loads the model into Ollama's RAM by sending
     a minimal keep-alive request.
@@ -148,6 +156,10 @@ def warm_model(role: str = "default") -> bool:
     Call this ONCE before starting any agent that uses LLM.
     Subsequent LLM calls will find the model already loaded
     and will complete in ~30-60s instead of timing out.
+
+    Args:
+        role: "default" (14B pentest model) or "reasoning" (8B orchestrator model)
+        keep_alive: How long to keep the model loaded (default: 2h)
 
     Returns True if model is warm and responding.
     """
@@ -158,36 +170,43 @@ def warm_model(role: str = "default") -> bool:
     cfg = _load_config()
     base_url = cfg["ollama_base_url"]
     role_cfg = cfg["models"].get(role, cfg["models"]["default"])
-    model_name = role_cfg.get("name", role_cfg.get("base_model", "qwen2.5:14b-instruct-q4_K_M"))
-
+    
+    # Try tuned model first, fall back to base model
+    tuned_model = role_cfg.get("name")
+    base_model = role_cfg.get("base_model", tuned_model)
+    
     console = Console()
-    console.print(
-        f"[cyan]⚡ Warming model {model_name}...[/]",
-        end=" ",
-    )
+    
+    for model_name in [tuned_model, base_model]:
+        if not model_name:
+            continue
+            
+        console.print(f"[cyan]⚡ Warming model {model_name} (keep_alive={keep_alive})...[/]", end=" ")
 
-    try:
-        c = ollama.Client(host=base_url)
-        start = time.time()
+        try:
+            c = ollama.Client(host=base_url)
+            start = time.time()
 
-        # Minimal prompt — just loads the model into RAM
-        # keep_alive="10m" keeps it warm for 10 minutes
-        c.chat(
-            model=model_name,
-            messages=[{"role": "user", "content": "ready"}],
-            options={
-                "num_predict": 3,
-                "temperature": 0.0,
-            },
-            keep_alive="10m",
-        )
-        elapsed = time.time() - start
-        console.print(f"[green]✓ warm ({elapsed:.1f}s)[/]")
-        return True
+            # Minimal prompt — just loads the model into RAM
+            c.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": "ready"}],
+                options={
+                    "num_predict": 3,
+                    "temperature": 0.0,
+                },
+                keep_alive=keep_alive,  # Keep warm for 2 hours by default
+            )
+            elapsed = time.time() - start
+            console.print(f"[green]✓ warm ({elapsed:.1f}s)[/]")
+            return True
 
-    except Exception as e:
-        console.print(f"[yellow]⚠ warm failed: {e}[/]")
-        return False
+        except Exception as e:
+            console.print(f"[yellow]⚠ {model_name} failed: {e}[/]")
+            continue
+    
+    console.print(f"[red]✗ Could not warm any model for role '{role}'[/]")
+    return False
 
 
 def get_ollama_client():

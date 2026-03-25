@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from memory.mission_memory import MissionMemory
 from agents.orchestrator_agent import OrchestratorAgent
+from utils.llm_factory import warm_model
 
 console = Console()
 
@@ -99,6 +100,13 @@ def main():
         parser.error("Provide --target, --resume, or --report-only")
 
     print_banner()
+
+    # ── Pre-warm LLM model ────────────────────────────────────────────────────
+    # Load the SINGLE unified model into Ollama's RAM.
+    # Using one model for all agents prevents RAM exhaustion from model swapping.
+    console.print("\n[bold cyan]🔥 Pre-warming LLM model...[/]")
+    warm_model("default", keep_alive="2h")   # cyberagent-pentest:14b (14GB) - ALL agents
+    console.print("[green]✓ Model ready in RAM[/]\n")
 
     # ── Build MissionMemory ───────────────────────────────────────────────────
     if args.resume:
