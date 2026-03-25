@@ -836,7 +836,7 @@ Return JSON ONLY:
 
         return [], True
 
-    def _llm_with_timeout(self, prompt: str, timeout: int = 180) -> str:
+    def _llm_with_timeout(self, prompt: str, timeout: int = 300) -> str:
         """
         Runs self.llm.invoke(prompt) in a thread.
         Returns raw string response or "" on timeout/error.
