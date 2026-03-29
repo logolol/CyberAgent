@@ -4,7 +4,7 @@ get_llm(role="default"|"reasoning") → OllamaLLM (cyberagent-tuned models)
 get_embeddings() → OllamaEmbeddings(nomic-embed-text)
 
 Model hierarchy:
-  default  → cyberagent-pentest:14b  (falls back to qwen2.5:14b-instruct-q4_K_M)
+  default  → cyberagent-pentest:7b  (falls back to qwen2.5:7b-instruct-q4_K_M)
   reasoning → cyberagent-reasoning:8b (falls back to deepseek-r1:8b-llama-distill-q4_K_M)
 """
 import logging
@@ -158,7 +158,7 @@ def warm_model(role: str = "default", keep_alive: str = "2h") -> bool:
     and will complete in ~30-60s instead of timing out.
 
     Args:
-        role: "default" (14B pentest model) or "reasoning" (8B orchestrator model)
+        role: "default" (7B pentest model) or "reasoning" (8B orchestrator model)
         keep_alive: How long to keep the model loaded (default: 2h)
 
     Returns True if model is warm and responding.

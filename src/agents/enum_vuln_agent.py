@@ -134,7 +134,7 @@ class EnumVulnAgent(BaseAgent):
         # Warm the model NOW — before any agent logic runs
         # This ensures subsequent LLM calls find model already in RAM
         from utils.llm_factory import warm_model
-        self.log_info("Pre-warming Qwen2.5:14b for enumeration...")
+        self.log_info("Pre-warming Qwen2.5:7b for enumeration...")
         warm_model(role="default")
 
     # ── Main entry point ──────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ class EnumVulnAgent(BaseAgent):
         self.console.print(Panel(
             f"[bold cyan]🔎 EnumVulnAgent — Active Enum + Vuln Detection[/]\n"
             f"[white]Target:[/] [cyan]{target}[/]\n"
-            f"[white]Model:[/] Qwen2.5:14b | [white]RAG:[/] 147K docs\n"
+            f"[white]Model:[/] Qwen2.5:7b | [white]RAG:[/] 147K docs\n"
             f"[white]Concurrency:[/] {self.MAX_CONCURRENT} parallel tools",
             border_style="cyan",
         ))
@@ -3090,5 +3090,4 @@ Return JSON:
 
         self.log_warning(f"JSON extraction failed from: {text[:200]!r}")
         return None
-
 

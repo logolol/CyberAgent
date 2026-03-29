@@ -586,7 +586,7 @@ class OrchestratorAgent(BaseAgent):
         self.console.print(Panel.fit(
             f"[bold white]🎯  Target  :[/] [cyan]{target}[/]\n"
             f"[bold white]   Mission :[/] [cyan]{self.memory.mission_id}[/]\n"
-            f"[bold white]   Models  :[/] cyberagent-pentest:14b + cyberagent-reasoning:8b\n"
+            f"[bold white]   Models  :[/] cyberagent-pentest:7b + cyberagent-reasoning:8b\n"
             f"[bold white]   RAG     :[/] 147,029 docs (15 collections) | Tools: 4,309+\n"
             f"[bold white]   MCP     :[/] {mcp_label}\n"
             f"[bold white]   Phase   :[/] [yellow]{phase}[/]",

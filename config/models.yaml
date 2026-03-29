@@ -1,24 +1,24 @@
 models:
   # ── UNIFIED model for ALL agents ──
   # Using single model to prevent RAM exhaustion from model swapping.
-  # The 14B model handles all tasks: recon, enum, exploitation, AND orchestration.
+  # The 7B model handles all tasks: recon, enum, exploitation, AND orchestration.
   default:
-    name: cyberagent-pentest:14b
-    base_model: qwen2.5:14b-instruct-q4_K_M
+    name: cyberagent-pentest:7b
+    base_model: qwen2.5:7b-instruct-q4_K_M
     use_for: [recon, enumeration, vuln_scan, exploitation, post_exploit, reporting, orchestrator, privesc]
     temperature: 0.1
     num_ctx: 8192
-    description: "Qwen2.5:14b with expert pentest system prompt — unified for all phases"
+    description: "Qwen2.5:7b with expert pentest system prompt — unified for all phases"
   
   # Reasoning now points to same model (prevents swapping)
   reasoning:
-    name: cyberagent-pentest:14b
-    base_model: qwen2.5:14b-instruct-q4_K_M
+    name: cyberagent-pentest:7b
+    base_model: qwen2.5:7b-instruct-q4_K_M
     use_for: [orchestrator, privesc, exploit_chaining, report_generation]
     temperature: 0.05
     num_ctx: 8192
     num_predict: 512
-    description: "Same 14B model for reasoning tasks — prevents model swapping"
+    description: "Same 7B model for reasoning tasks — prevents model swapping"
   
   embedding:
     name: nomic-embed-text
@@ -26,12 +26,12 @@ models:
 
   # ── Base models (fallback if tuned models fail) ──
   default_base:
-    name: qwen2.5:14b-instruct-q4_K_M
+    name: qwen2.5:7b-instruct-q4_K_M
     use_for: [fallback]
     temperature: 0.1
     num_ctx: 8192
   reasoning_base:
-    name: qwen2.5:14b-instruct-q4_K_M
+    name: qwen2.5:7b-instruct-q4_K_M
     use_for: [fallback]
     temperature: 0.05
     num_ctx: 8192

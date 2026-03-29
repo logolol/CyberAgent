@@ -105,7 +105,7 @@ def main():
     # Load the SINGLE unified model into Ollama's RAM.
     # Using one model for all agents prevents RAM exhaustion from model swapping.
     console.print("\n[bold cyan]🔥 Pre-warming LLM model...[/]")
-    warm_model("default", keep_alive="2h")   # cyberagent-pentest:14b (14GB) - ALL agents
+    warm_model("default", keep_alive="2h")   # cyberagent-pentest:7b (~5GB) - ALL agents
     console.print("[green]✓ Model ready in RAM[/]\n")
 
     # ── Build MissionMemory ───────────────────────────────────────────────────

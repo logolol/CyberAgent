@@ -81,7 +81,7 @@ class ServiceAnalyzer:
         """
         Args:
             chroma_manager: ChromaManager for RAG queries
-            llm_client: LLM for reasoning (qwen2.5:14b recommended)
+            llm_client: LLM for reasoning (qwen2.5:7b recommended)
             tool_executor: Optional ToolExecutor for active probing
         """
         self.chroma = chroma_manager
