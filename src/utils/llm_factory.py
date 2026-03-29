@@ -121,17 +121,11 @@ def get_reasoning_llm(task_complexity: str = "medium") -> dict:
         {"model": ..., "options": {"num_predict": ..., ...}}
     """
     cfg = _load_config()
-    # Use tuned model; fall back to base if unavailable
-    tuned = cfg["models"]["reasoning"]["name"]          # cyberagent-reasoning:8b
-    base  = cfg["models"]["reasoning_base"]["name"]     # deepseek-r1:8b-llama-distill-q4_K_M
-    available = {tuned, base}
-    try:
-        import ollama
-        client = ollama.Client(host=cfg["ollama_base_url"])
-        listed = {m["model"] for m in client.list().get("models", [])}
-        model = tuned if tuned in listed else base
-    except Exception:
-        model = base
+    # Keep this path deterministic/non-blocking for orchestrator calls.
+    # Model availability checks can hang under load, so use configured model
+    # directly and let upstream timeout handling/fallback deal with failures.
+    tuned = cfg["models"]["reasoning"]["name"]
+    model = tuned
 
     budgets = {"low": 512, "medium": 1024, "high": 2048}
     return {

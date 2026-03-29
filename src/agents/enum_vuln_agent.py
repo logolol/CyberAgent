@@ -281,11 +281,12 @@ class EnumVulnAgent(BaseAgent):
         else:
             scanner_name = Path(port_scanner).name
             if scanner_name == "nmap":
+                # Fast scan: --top-ports 1000 for quick results + service detection
+                # Full port scan (-p 1-65535) takes 10+ minutes causing timeouts
                 wave1_args = [
                     self.target, "-sV", "-sC",
-                    "-p", "1-65535",
-                    "-T4", "--open",
-                    "--min-rate", "1000"
+                    "--top-ports", "1000",
+                    "-T4", "--open"
                 ]
             elif scanner_name == "masscan":
                 wave1_args = [self.target, "-p1-1000", "--rate", "1000"]
@@ -308,12 +309,14 @@ class EnumVulnAgent(BaseAgent):
         # Security control analysis: reason about wave 1 outputs before wave 2
         self._analyze_security_controls()
 
-        # Wave 2: LLM-driven service probing based on discovered ports.
+        # Wave 2: Deterministic service probing based on discovered ports.
+        # Uses _build_wave2_from_ports() which maps services → tools without LLM.
+        # This avoids 300s LLM timeout that blocks the entire pipeline.
         try:
             port_services = self._extract_port_services()
             if port_services:
-                self.log_info("Asking LLM+RAG what to enumerate next...")
-                wave2_specs = self._decide_wave2_with_llm(port_services)
+                self.log_info(f"Wave 2: deterministic service probing for {len(port_services)} ports")
+                wave2_specs = self._build_wave2_from_ports()
             else:
                 wave2_specs = []
             if wave2_specs:
@@ -1018,14 +1021,10 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"risk_summary":"string","attack_priority":"string","mitre_chain":["T1046","T1190"]}'
         )
 
-        self.log_info("Running final LLM+RAG vulnerability analysis...")
-        raw = self._llm_with_timeout(prompt, timeout=300)
-        analysis = self._extract_json_robust(raw)
-        if isinstance(analysis, dict):
-            self.log_success("LLM analysis complete with RAG grounding")
-            return analysis
-
-        self.log_warning("Analysis LLM unavailable/unparseable — using regex analysis fallback")
+        # DETERMINISTIC: Skip LLM analysis to avoid 300s blocking timeout.
+        # Use regex-based analysis which extracts ports/vulns from tool output.
+        # The RAG context is still valuable for enriching findings later.
+        self.log_info("Running deterministic vulnerability analysis (regex + RAG)...")
         return self._regex_analysis_fallback()
 
     def _plan_initial_attack(self) -> dict[str, Any]:
@@ -1680,6 +1679,9 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                         cvss=float(vuln.get("cvss_score", 0.0) or 0.0),
                         description=str(vuln.get("description", detail or "Potential vulnerability")),
                         exploitable=bool(vuln.get("exploitable", False)),
+                        port=vuln.get("port"),
+                        service=service,
+                        version=vuln.get("version"),
                     )
                 except Exception as e:
                     self.log_warning(f"Failed to persist vulnerability: {e}")
@@ -1822,8 +1824,10 @@ Use only evidence above — do not invent:
                                 break
             return None
 
-        raw = self._llm_with_timeout(prompt, timeout=300)
-        batch_result = _extract_json_array(raw)
+        # DETERMINISTIC: Skip LLM exploitability reasoning to avoid 300s blocking.
+        # Use CVSS-based heuristic that marks high-CVSS confirmed CVEs as exploitable.
+        self.log_info("Using CVSS-based exploitability heuristic (no LLM)")
+        batch_result = None
 
         if isinstance(batch_result, list):
             result_map = {
@@ -1850,6 +1854,9 @@ Use only evidence above — do not invent:
                             cvss=float(vuln.get("cvss_score", 0.0) or 0),
                             description=str(vuln.get("description", vuln.get("title", ""))),
                             exploitable=True,
+                            port=vuln.get("port"),
+                            service=vuln.get("service"),
+                            version=vuln.get("version"),
                         )
                     except Exception:
                         pass
@@ -2020,53 +2027,45 @@ Use only evidence above — do not invent:
         elif stats["medium"] > 0:
             risk_score = "medium"
 
-        # LLM-derived critical path analysis for ExploitationAgent
+        # DETERMINISTIC: Skip LLM critical path analysis to avoid 240s timeout.
+        # Build attack path from sorted vulns by severity and exploitability.
         attack_summary = {}
         if cleaned_vulns:
-            critical_path_prompt = f"""Given these vulnerability findings
-from active enumeration of {self.target}:
-
-{json.dumps([{
-    'cve': v.get('cve'),
-    'service': v.get('service'),
-    'severity': v.get('severity'),
-    'confidence': v.get('confidence'),
-    'exploitable': v.get('exploitable'),
-    'exploitation_context': v.get('exploitation_context', '')
-} for v in cleaned_vulns[:10]], default=str, indent=2)[:1200]}
-
-Security controls detected:
-{json.dumps(self._security_controls, default=str)[:300]}
-
-Determine the optimal attack path for ExploitationAgent.
-Reason about: which vulnerability has the highest probability
-of success? Which provides the most valuable access?
-What is the complete picture of attack vectors available?
-
-Return JSON:
-{{
-  "critical_path": {{
-    "service": "derived from findings",
-    "port": 0,
-    "cve": "derived from findings",
-    "confidence": "derived from exploitability reasoning",
-    "why_first": "reasoning for this priority"
-  }},
-  "all_attack_vectors": [
-    {{
-      "service": "from findings",
-      "vector_type": "from knowledge base",
-      "priority": 1,
-      "requires": "what conditions must hold"
-    }}
-  ],
-  "recommended_exploits": [],
-  "evasion_needed": false,
-  "exploitation_guidance": "overall strategy for next phase"
-}}"""
-
-            raw = self._llm_with_timeout(critical_path_prompt, timeout=240)
-            attack_summary = self._extract_json_robust(raw) or {}
+            # Sort vulns: exploitable first, then by CVSS score
+            sorted_vulns = sorted(
+                [v for v in cleaned_vulns if isinstance(v, dict)],
+                key=lambda v: (
+                    not v.get("exploitable", False),  # exploitable first
+                    -float(v.get("cvss_score", 0) or 0),  # higher CVSS first
+                ),
+            )
+            
+            if sorted_vulns:
+                top = sorted_vulns[0]
+                attack_summary = {
+                    "critical_path": {
+                        "service": str(top.get("service", "unknown")),
+                        "port": int(top.get("port", 0) or 0),
+                        "cve": str(top.get("cve", "CVE-UNKNOWN")),
+                        "confidence": str(top.get("confidence", "medium")),
+                        "why_first": f"Highest priority: CVSS {top.get('cvss_score', 0)}, exploitable={top.get('exploitable')}",
+                    },
+                    "all_attack_vectors": [
+                        {
+                            "service": str(v.get("service", "")),
+                            "vector_type": str(v.get("title", "")),
+                            "priority": i + 1,
+                            "requires": "standard exploitation",
+                        }
+                        for i, v in enumerate(sorted_vulns[:5])
+                    ],
+                    "recommended_exploits": [
+                        str(v.get("cve", "")) for v in sorted_vulns[:3]
+                        if v.get("cve", "").startswith("CVE-")
+                    ],
+                    "evasion_needed": bool(self._security_controls.get("firewall")),
+                    "exploitation_guidance": f"Target {len([v for v in sorted_vulns if v.get('exploitable')])} exploitable vulns in priority order",
+                }
 
         result = {
             "agent": "EnumVulnAgent",
@@ -2150,6 +2149,9 @@ Return JSON:
                     cvss=float(vuln.get("cvss_score", 0.0) or 0.0),
                     description=str(vuln.get("title", vuln.get("description", "Potential vulnerability"))),
                     exploitable=bool(vuln.get("exploitable", False)),
+                    port=vuln.get("port"),
+                    service=vuln.get("service"),
+                    version=vuln.get("version"),
                 )
             except Exception as e:
                 self.log_warning(f"Failed to persist vulnerability: {e}")
@@ -2766,6 +2768,17 @@ Return JSON:
                 if cve_id != "CVE-UNKNOWN":
                     seen_cves.add(cve_id)
 
+                # Try to extract port from URL
+                port = 0
+                if url:
+                    port_match = re.search(r':(\d+)', url)
+                    if port_match:
+                        port = int(port_match.group(1))
+                    elif 'https://' in url:
+                        port = 443
+                    elif 'http://' in url:
+                        port = 80
+
                 vulnerabilities.append({
                     "title": f"Nuclei: {template}",
                     "service": protocol,
@@ -2777,6 +2790,7 @@ Return JSON:
                     "exploitable": severity in ["critical", "high"],
                     "exploit_available": cve_id != "CVE-UNKNOWN",
                     "mitre_technique": "T1190",
+                    "port": port if port else None,
                 })
 
         # Detect backdoor/critical services from nmap output
@@ -2793,6 +2807,40 @@ Return JSON:
              'CVE-2007-2447', 10.0, 'smb'),
         ]
         
+        # Map services to their typical ports
+        service_port_map = {
+            "ftp": 21,
+            "ssh": 22,
+            "telnet": 23,
+            "smtp": 25,
+            "http": 80,
+            "smb": 445,
+            "irc": 6667,
+            "distccd": 3632,
+            "java-rmi": 1099,
+            "mysql": 3306,
+            "postgresql": 5432,
+            "vnc": 5900,
+            "tomcat": 8180,
+            "bindshell": 1524,
+            "rexec": 512,
+            "rlogin": 513,
+            "rsh": 514,
+            "nfs": 2049,
+        }
+        
+        # Build port lookup from discovered ports
+        port_by_service: dict[str, int] = {}
+        version_by_port: dict[int, str] = {}
+        for p in ports:
+            svc = str(p.get("service", "")).lower()
+            pnum = int(p.get("port", 0) or 0)
+            ver = str(p.get("version", ""))
+            if svc and pnum:
+                port_by_service[svc] = pnum
+            if pnum and ver:
+                version_by_port[pnum] = ver
+        
         for pattern, title, cve, cvss, service in backdoor_patterns:
             for output in outputs.values():
                 if re.search(pattern, str(output), re.IGNORECASE):
@@ -2800,6 +2848,9 @@ Return JSON:
                     if cve_key in seen_cves:
                         continue
                     seen_cves.add(cve_key)
+                    # Get port from discovered ports or default
+                    port = port_by_service.get(service, service_port_map.get(service, 0))
+                    version = version_by_port.get(port, "")
                     vulnerabilities.append({
                         "title": title,
                         "service": service,
@@ -2810,6 +2861,8 @@ Return JSON:
                         "evidence": f"Version string detected in scan output",
                         "exploitable": True,
                         "mitre_technique": "T1190",
+                        "port": port,
+                        "version": version,
                     })
                     break
 

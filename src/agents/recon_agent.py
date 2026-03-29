@@ -468,7 +468,11 @@ class ReconAgent(BaseAgent):
                     wave_results.get("dns_all_records", ""),
                     wave_results.get("host_lookup", ""),
                 ])
-                self.resolved_ip = self._extract_ip_from_dns(dns_blob)
+                # For direct IPv4 targets, lock resolution to the exact target.
+                if self._is_valid_ipv4(self.target):
+                    self.resolved_ip = self.target
+                else:
+                    self.resolved_ip = self._extract_ip_from_dns(dns_blob)
                 if self.resolved_ip:
                     self.log_success(f"Target resolved: {target} → {self.resolved_ip}")
                     existing = [h["ip"] for h in self.all_findings["hosts"]]
@@ -670,7 +674,10 @@ class ReconAgent(BaseAgent):
         Unified wave planner for all target types.
         Uses LLM + RAG + MITRE guidance, with heuristic fallback only on hard failure.
         """
-        return self._intelligent_next_wave(wave_num, wave_results)
+        # Keep recon wave planning deterministic/non-blocking to prevent
+        # long LLM waits from stalling the full mission pipeline.
+        del wave_results
+        return self._heuristic_next_wave(wave_num)
 
     def _intelligent_next_wave(self, wave_num: int, wave_results: dict[str, str]) -> tuple[list[str], bool]:
         """
@@ -1349,6 +1356,14 @@ Return JSON ONLY:
     def _add_host(self, ip: str, hostname: str, source: str):
         if not self._is_valid_ipv4(ip):
             return
+        # For internal IP targets, keep host discovery scoped to the target IP.
+        # This avoids private-range drift from passive/OSINT noise.
+        try:
+            if self._detect_target_type() == "internal" and self._is_valid_ipv4(self.target):
+                if ip != self.target:
+                    return
+        except Exception:
+            pass
         candidate = self._guarded({"ip": ip, "hostname": hostname})
         ip_clean = candidate.get("ip", "")
         host_clean = str(candidate.get("hostname", "")).strip()

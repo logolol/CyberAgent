@@ -364,7 +364,7 @@ class OrchestratorAgent(BaseAgent):
         try:
             import ollama as _ollama
             import concurrent.futures
-            
+
             def _call_llm():
                 client = _ollama.Client(host="http://localhost:11434")
                 return client.chat(
@@ -374,12 +374,16 @@ class OrchestratorAgent(BaseAgent):
                     ],
                     options=params["options"],
                 )
-            
-            # Execute with 180s timeout to prevent indefinite hangs
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+
+            # Avoid context-manager shutdown wait on timeout; otherwise a stuck
+            # worker can block phase progression even after future timeout.
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(_call_llm)
                 resp = future.result(timeout=180)
-            
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
             raw = resp["message"]["content"]
         except concurrent.futures.TimeoutError:
             self.log_error("Direct LLM call timed out after 180s")
@@ -596,16 +600,14 @@ class OrchestratorAgent(BaseAgent):
 
         self.memory.log_action("Orchestrator", "mission_start", f"target={target} phase={phase}")
 
-        # ── STEP 2: Initial planning ──────────────────────────────────────────
-        prompt = (
-            f"Target: {target}, Phase: {phase}.\n"
-            'Return JSON: {"target_type":"ip","initial_hypothesis":"string",'
-            '"recon_priorities":["ports","services"],'
-            '"estimated_complexity":"medium","notes":"string"}'
-        )
-        planning_result = self._direct_llm(prompt, task_complexity="high")
-        if "error" in planning_result:
-            planning_result = {"target_type": "ip", "notes": f"Planning for {target}"}
+        # ── STEP 2: Initial planning (deterministic, non-blocking) ───────────
+        planning_result = {
+            "target_type": "ip",
+            "initial_hypothesis": "default credentials or misconfigurations",
+            "recon_priorities": ["ports", "services"],
+            "estimated_complexity": "medium",
+            "notes": f"Planning for {target}",
+        }
         self.memory.log_action("Orchestrator", "initial_planning", str(planning_result))
 
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
@@ -989,8 +991,23 @@ Return JSON:
                 "phases_completed": intel.get("phases_completed", []),
             }
 
-        # Generic fallback for recon and any unspecified phase
-        # (recon uses this — minimal needed, nothing known yet)
+        # Recon must be non-blocking: avoid LLM briefing call before first wave.
+        # If LLM is slow, this previously delayed/blocked the entire mission.
+        if phase_name == "recon":
+            hosts_summary = self._get_hosts_summary()
+            tool_examples = _PHASE_TOOL_EXAMPLES.get(phase_name, [])
+            return {
+                "priority_targets": list(hosts_summary.keys()) or [self.memory.target],
+                "known_info": hosts_summary,
+                "attack_vectors": ["Standard recon techniques"],
+                "avoid": [],
+                "rag_queries": [f"recon {self.memory.target}", "CVE exploits"],
+                "tool_commands": self._apply_placeholders(tool_examples[:3]),
+                "special_instructions": f"Focus on recon for {self.memory.target}.",
+                "mission_intelligence": intel,
+            }
+
+        # Generic fallback for non-recon / unspecified phases
         hosts_summary = self._get_hosts_summary()
         tool_examples = _PHASE_TOOL_EXAMPLES.get(phase_name, [])
         tool_block = "\n".join(self._apply_placeholders(tool_examples))
@@ -1117,67 +1134,24 @@ Return JSON:
 
             technology_intelligence.append(tech_intel)
 
-        synthesis_prompt = f"""You are preparing an attack briefing for
-the EnumerationAgent. You have pre-fetched knowledge base data
-about technologies discovered during reconnaissance.
+        # Deterministic/non-blocking briefing synthesis for enumeration.
+        # Avoids full-pipeline stalls on local LLM delays while preserving
+        # the RAG-enriched technology intelligence payload.
+        attack_priorities: list[str] = []
+        for t in technology_intelligence:
+            name = str(t.get("technology", "")).strip()
+            if name:
+                attack_priorities.append(name)
 
-Target: {self.memory.target}
-Mission state summary: {self.memory.get_full_context()[:300]}
-
-Discovered technologies with knowledge base context:
-{json.dumps(technology_intelligence, indent=2, default=str)[:1500]}
-
-Your task:
-Read the knowledge base data above. Reason about:
-  1. Which technologies represent the highest attack priority
-     based on what the knowledge base says about them?
-  2. What attack approaches does the knowledge base suggest
-     for each technology?
-  3. What entry points should enumeration focus on first?
-  4. What MITRE techniques are most applicable?
-
-Synthesize this into an actionable briefing for EnumerationAgent.
-Do not invent CVEs or exploits — only reference what appears
-in the knowledge base data provided above.
-
-Return JSON:
-{{
-  "attack_priorities": [],
-  "technology_briefings": [
-    {{
-      "technology": "from evidence",
-      "attack_approach": "derived from knowledge base",
-      "entry_points": [],
-      "mitre_techniques": []
-    }}
-  ],
-  "rag_context": "key knowledge base findings",
-  "enumeration_focus": "where to start and why"
-}}"""
-
-        briefing_data = self._direct_llm(
-            synthesis_prompt,
-            task_complexity="medium",
-        )
-
-        if "error" in briefing_data and not briefing_data.get("attack_priorities"):
-            # Try parsing raw response directly
-            raw = briefing_data.get("raw", "")
-            if raw:
-                parsed = self._extract_json_robust(raw)
-                if parsed and isinstance(parsed, dict):
-                    briefing_data = parsed
-
-        if not briefing_data or "error" in briefing_data:
-            return {
-                "technology_intelligence": technology_intelligence,
-                "attack_priorities": [],
-                "enumeration_focus": "full service enumeration",
-            }
-
-        # Merge technology_intelligence for downstream use
-        briefing_data["technology_intelligence"] = technology_intelligence
-        return briefing_data
+        return {
+            "technology_intelligence": technology_intelligence,
+            "attack_priorities": attack_priorities[:8],
+            "technology_briefings": [],
+            "rag_context": "RAG-enriched technology intelligence attached",
+            "enumeration_focus": "full service enumeration with priority on detected technologies",
+            "hosts_summary": hosts_summary,
+            "recent_results": prev_results,
+        }
 
     def _format_rag_compact(
         self, results: list, max_chars: int = 200
@@ -1192,32 +1166,30 @@ Return JSON:
 
     def _analyze_phase_result(self, phase: str, result: dict) -> dict:
         """
-        Ask DeepSeek-R1 to analyse what a specialist agent returned.
-        Uses medium complexity (1024 token budget).
-
-        Falls back to external intel enrichment if LLM fails.
+        Deterministic post-phase analysis.
+        Keeps phase transitions non-blocking while preserving gate-critical fields.
         """
         inner = result.get("result", {})
-        prompt = (
-            f"Phase '{phase}' done. Success: {result.get('success')}. "
-            f"Results: {json.dumps(inner)[:300]}\n"
-            "ANTI-HALLUCINATION: Only report what is CONFIRMED in Results above.\n"
-            'Return JSON: {"success":true,"findings_count":0,"key_insight":"string",'
-            '"critical_finding":false,"recommended_next":"string",'
-            '"strategy_update":null,"attack_chain_adjustment":null}'
-        )
-        data = self._direct_llm(prompt, task_complexity="medium")
-        if "error" in data:
-            # Try external intel enrichment for CVE-related phases
-            base = {
-                "success": bool(result.get("success")),
-                "findings_count": len(inner) if isinstance(inner, dict) else 0,
-                "key_insight": f"Phase {phase} {'succeeded' if result.get('success') else 'failed'}",
-                "critical_finding": False,
-                "recommended_next": "continue",
-            }
-            return self._enrich_with_external_intel(base, phase)
-        return data
+        findings_count = len(inner) if isinstance(inner, dict) else 0
+        success = bool(result.get("success"))
+        key_insight = f"Phase {phase} {'succeeded' if success else 'failed'}"
+
+        if phase == "enumeration" and isinstance(inner, dict):
+            exploitable = int(inner.get("exploitable_vulns", 0) or 0)
+            total_vulns = len(inner.get("vulnerabilities", []) or [])
+            findings_count = max(findings_count, total_vulns)
+            key_insight = (
+                f"Enumeration found {total_vulns} vulnerabilities "
+                f"({exploitable} exploitable)"
+            )
+
+        return {
+            "success": success,
+            "findings_count": findings_count,
+            "key_insight": key_insight,
+            "critical_finding": False,
+            "recommended_next": "continue",
+        }
 
     def _update_attack_strategy(self, analysis: dict):
         """Log a strategy pivot triggered by a critical finding."""

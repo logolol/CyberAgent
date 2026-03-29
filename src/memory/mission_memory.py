@@ -123,7 +123,8 @@ class MissionMemory:
         self.save_state()
 
     def add_vulnerability(self, ip: str, cve: str, cvss: float,
-                          description: str, exploitable: bool = False):
+                          description: str, exploitable: bool = False,
+                          port: int = None, service: str = None, version: str = None):
         import re as _re
         # Validate and normalise CVE
         cve = str(cve).strip().upper()
@@ -146,12 +147,29 @@ class MissionMemory:
             _log.warning("add_vulnerability: empty description — using placeholder")
         # Validate exploitable
         exploitable = bool(exploitable)
+        # Validate port
+        try:
+            port = int(port) if port is not None else None
+        except (TypeError, ValueError):
+            port = None
+        # Validate service/version
+        service = str(service).strip() if service else None
+        version = str(version).strip() if version else None
 
         self._ensure_host(ip)
-        self._state["hosts"][ip]["vulnerabilities"].append({
+        vuln_entry = {
             "cve": cve, "cvss": cvss, "description": description,
             "exploitable": exploitable,
-        })
+        }
+        # Add optional fields if provided
+        if port is not None:
+            vuln_entry["port"] = port
+        if service:
+            vuln_entry["service"] = service
+        if version:
+            vuln_entry["version"] = version
+        
+        self._state["hosts"][ip]["vulnerabilities"].append(vuln_entry)
         self.save_state()
 
     def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = ""):
