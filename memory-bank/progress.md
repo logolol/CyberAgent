@@ -476,3 +476,31 @@ Commits: Pending
 - **Replaced:** `src/agents/reporting_agent.py` (950+ lines, was stub)
 - **Modified:** `src/agents/exploitation_agent.py` (+216 lines searchsploit)
 - **Total:** ~1,200+ lines of new production code
+
+## Day 9 (2026-03-30) - Critical Exploitation Bugs Fixed
+
+### Debugging & Fixes
+After analyzing the failed pentest test logs, identified and fixed 5 critical bugs:
+
+1. **MSF Timeout Issue** - Increased from 60s → 180s across all MSF execution paths
+2. **Port Scanning Bug** - Fixed nmap `-p` overriding `--top-ports` (now scans 25 ports vs 3)
+3. **Bindshell Detection** - Added robust shell indicators (uid=, root, Linux, $, #, bash, bin)
+4. **Hostname Resolution** - Added IP resolution at agent init for faster MSF execution
+5. **JSON Parsing** - Added `_extract_json_robust()` with 3 fallback strategies
+
+### Manual Exploit Verification
+- ✅ Samba CVE-2007-2447: Root shell in 28s
+- ✅ distccd CVE-2004-2687: Daemon shell via nmap script
+- ✅ PHP-CGI CVE-2012-1823: Detected by Nuclei
+- ✅ Port scan: Now finds all 25 open ports on Metasploitable2
+
+### Commits
+- `95ff4a9` - Fix MSF timeout, port 1524, bindshell
+- `29280d5` - Fix nmap port scan (-p overrides --top-ports)
+- `eb05d76` - Add IP resolution for MSF reliability
+
+### Status
+- **Exploitation Phase:** WORKING (KNOWN_EXPLOITS path verified)
+- **AGI Fallback:** Still broken (ExploitReasoner returns no execution methods)
+- **Ready for:** Full end-to-end pentest with longer timeout
+
