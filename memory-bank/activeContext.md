@@ -1,44 +1,47 @@
 # CyberAgent — Active Context
 
-Last updated: Day 7+ (AGI Transformation Phase 1 Complete)
+Last updated: Day 8 (PostExploit + Reporting Agents Complete)
 
 ## Current Phase
 
-Sprint S9-S11 COMPLETE — ExploitationAgent built, tested, and full chain verified.
-**NEW:** AGI Transformation Phase 1 COMPLETE — ExploitReasoner + ServiceAnalyzer integrated.
+Sprint S12-S15 COMPLETE — PostExploitAgent + ReportingAgent fully implemented.
+**NEW:** Exploitation generalized with dynamic searchsploit CVE lookup.
 
-Current status: ExploitationAgent now 75% AGI-capable with adaptive reasoning.
-Next: PrivEscAgent reasoning loop + PayloadFactory (Phase 2).
+Current status: All 8 specialist agents are production-ready.
+Next: Full pentest validation run.
 
-## AGI Transformation Status
+## Agent Status
 
-**Phase 1 Complete (3/10 todos done):**
-- ✅ ExploitReasoner - RAG-driven exploit discovery (zero hardcoded CVEs)
-- ✅ ServiceAnalyzer - Unknown service behavior reasoning
-- ✅ ExploitationAgent refactor - Removed hardcoded fast path, added AGI flow
+| Agent | Status | Lines | Key Features |
+|-------|--------|-------|--------------|
+| OrchestratorAgent | ✅ Complete | 1,300+ | Phase gates, agent briefings, mission flow |
+| ReconAgent | ✅ Complete | 1,400+ | Wave-based passive recon, MITRE mapping |
+| EnumVulnAgent | ✅ Complete | 2,900+ | Service enum, vuln detection, RAG enrichment |
+| ExploitationAgent | ✅ Complete | 3,500+ | Dynamic CVE lookup, searchsploit, MSF |
+| PrivEscAgent | ✅ Complete | 1,000+ | LinPEAS, GTFOBins, kernel exploits |
+| PostExploitAgent | ✅ Complete | 1,250+ | Loot, lateral movement, track clearing |
+| ReportingAgent | ✅ Complete | 950+ | PDF/MD/JSON reports, AI analysis |
+| BaseAgent | ✅ Complete | 1,100+ | ReAct loop, hallucination guard |
 
-**Adaptability Scores:**
-- ExploitationAgent: 5/10 → 7.5/10 (target: 9/10)
-- System Overall: 6.5/10 → 7.2/10 (target: 9/10)
+## Latest Changes (Day 8)
 
-**Phase 2 Planned:**
-- PrivEscAgent reasoning loop
-- PayloadFactory (dynamic shellcode generation)
-- AttackGraph (exploit chain combination)
-- ZeroDayAnalyzer (root cause analysis)
+### PostExploitAgent Enhancements
+- Added Phase 8: Track clearing (optional, MITRE T1070)
+- Clears bash history, lastlog, btmp when authorized
+- Full MITRE coverage: T1003, T1552, T1083, T1087, T1018, T1046, T1021, T1070
 
-## LLM Validation ✅
+### ReportingAgent (Full Implementation)
+- Replaced stub with 950+ line production agent
+- PDF generation via ReportLab with professional styling
+- Vulnerability pie charts and color-coded tables
+- AI-generated executive summary and remediation
+- Parallel Markdown and JSON outputs
 
-All Ollama models tested and validated:
-- **qwen2.5:14b (cyberagent-pentest:14b):** ✓ No hallucinations, no timeouts, no empty responses
-- **deepseek-r1:8b (cyberagent-reasoning:8b):** ✓ JSON parsing works, reasoning intact
-- **nomic-embed-text:** ✓ 768-dim embeddings working (RAG operational)
-
-Test results (latest validation):
-- Response quality: ✅ Accurate, concise, no hallucinations
-- Timeout handling: ✅ 120s HTTP timeout, 60s per LLM call
-- Empty response detection: ✅ Zero empty responses in 3-test batch
-- Embeddings: ✅ Correct dimensionality, proper vector generation
+### Exploitation Generalization
+- `_searchsploit_find_exploit()` — dynamic CVE lookup
+- `_get_dynamic_lhost()` — automatic attacker IP detection
+- All hardcoded IPs removed
+- 50,000+ ExploitDB entries now accessible
 
 ## Agent Intelligence Architecture (ALL agents)
 
