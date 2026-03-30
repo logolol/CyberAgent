@@ -266,10 +266,16 @@ class ReportingAgent(BaseAgent):
         if not self.vulns:
             return "No vulnerabilities discovered."
         
-        by_severity = {"critical": [], "high": [], "medium": [], "low": []}
+        # Initialize ALL severity buckets including info and unknown
+        by_severity = {
+            "critical": [], "high": [], "medium": [],
+            "low": [], "info": [], "unknown": []
+        }
         for v in self.vulns:
             cvss = v.get("cvss", 0) or 0
             sev = self._cvss_to_severity(cvss)
+            if sev not in by_severity:
+                sev = "unknown"
             by_severity[sev].append(v)
         
         lines = [f"Total vulnerabilities: {len(self.vulns)}"]
