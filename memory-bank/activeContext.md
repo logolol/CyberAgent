@@ -1,150 +1,112 @@
-# CyberAgent — Active Context
+# Active Context - What We're Working On
 
-Last updated: Day 8 (PostExploit + Reporting Agents Complete)
+**Last Updated:** 2026-03-30 (Day 9)
 
-## Current Phase
+## Current Status: ✅ READY FOR FULL PENTEST
 
-Sprint S12-S15 COMPLETE — PostExploitAgent + ReportingAgent fully implemented.
-**NEW:** Exploitation generalized with dynamic searchsploit CVE lookup.
+### Just Completed
+All critical exploitation bugs have been fixed after analyzing failed test logs:
 
-Current status: All 8 specialist agents are production-ready.
-Next: Full pentest validation run.
+1. ✅ MSF timeout increased to 180s (was 60s)
+2. ✅ Port scanning fixed (25 ports vs 3)  
+3. ✅ Bindshell detection improved
+4. ✅ IP resolution added for MSF
+5. ✅ Robust JSON extraction
 
-## Agent Status
+### Verified Working
+- **Samba exploit:** Root shell in 28s ✅
+- **distccd exploit:** Daemon shell ✅
+- **PHP-CGI detection:** Nuclei finds CVE-2012-1823 ✅
+- **Port enumeration:** All 25 services detected ✅
 
-| Agent | Status | Lines | Key Features |
-|-------|--------|-------|--------------|
-| OrchestratorAgent | ✅ Complete | 1,300+ | Phase gates, agent briefings, mission flow |
-| ReconAgent | ✅ Complete | 1,400+ | Wave-based passive recon, MITRE mapping |
-| EnumVulnAgent | ✅ Complete | 2,900+ | Service enum, vuln detection, RAG enrichment |
-| ExploitationAgent | ✅ Complete | 3,500+ | Dynamic CVE lookup, searchsploit, MSF |
-| PrivEscAgent | ✅ Complete | 1,000+ | LinPEAS, GTFOBins, kernel exploits |
-| PostExploitAgent | ✅ Complete | 1,250+ | Loot, lateral movement, track clearing |
-| ReportingAgent | ✅ Complete | 950+ | PDF/MD/JSON reports, AI analysis |
-| BaseAgent | ✅ Complete | 1,100+ | ReAct loop, hallucination guard |
+## What to Test Next
 
-## Latest Changes (Day 8)
+### Immediate: Full Pentest Run
+```bash
+# Run with 1-hour timeout to allow completion
+timeout 3600 python3 main.py --target victim-machine --phase full -v 2>&1 | tee full_pentest_$(date +%s).log
 
-### PostExploitAgent Enhancements
-- Added Phase 8: Track clearing (optional, MITRE T1070)
-- Clears bash history, lastlog, btmp when authorized
-- Full MITRE coverage: T1003, T1552, T1083, T1087, T1018, T1046, T1021, T1070
+# Check for shells obtained
+grep -i "shell.*opened\|session.*opened\|SHELL" full_pentest_*.log
+```
 
-### ReportingAgent (Full Implementation)
-- Replaced stub with 950+ line production agent
-- PDF generation via ReportLab with professional styling
-- Vulnerability pie charts and color-coded tables
-- AI-generated executive summary and remediation
-- Parallel Markdown and JSON outputs
+### Expected Results
+- ✅ Phase 0: No bindshells (port 1524 closed on this target)
+- ✅ Phase 1: Samba exploit should succeed → root shell
+- ✅ Phase 1: distccd exploit should succeed → daemon shell
+- ✅ Phase 2: PostExploit should loot credentials, enumerate system
+- ✅ Phase 3: Report should generate PDF with findings
 
-### Exploitation Generalization
-- `_searchsploit_find_exploit()` — dynamic CVE lookup
-- `_get_dynamic_lhost()` — automatic attacker IP detection
-- All hardcoded IPs removed
-- 50,000+ ExploitDB entries now accessible
+## Known Issues (Low Priority)
 
-## Agent Intelligence Architecture (ALL agents)
+### AGI Fallback Not Working
+- ExploitReasoner returns candidates without execution methods
+- `_fallback_candidate_extraction()` creates generic non-actionable candidates
+- **Impact:** LOW (KNOWN_EXPLOITS path works for common vulns)
+- **Fix Later:** Either improve ExploitReasoner or disable AGI fallback
 
-Every specialist agent follows this loop:
+## Architecture Overview
 
-Tool output  
-↓  
-RAG context injection (phase-aware ChromaDB query)  
-↓  
-MITRE ATT&CK context lookup (`mitre_attack` collection)  
-↓  
-LLM reasoning (`cyberagent-pentest:14b`)  
-↓  
-Structured decision (next tool / next action)  
-↓  
-Tool execution (`DynamicToolManager`)  
-↓  
-`hallucination_guard()` on extracted output  
-↓  
-MissionMemory write (orchestrator consumes evidence)
+### Exploitation Flow
+```
+1. Phase 0: Direct Access (bindshells, anon FTP, rsh)
+   └─> _try_bindshell(), _try_anon_ftp(), _try_rsh()
+   
+2. Phase 1: KNOWN_EXPLOITS Fast-Path (14 exploits)
+   └─> CVE match → MSF module → _execute_known_exploit()
+   └─> ✅ RELIABLE & TESTED
+   
+3. Phase 2: AGI Fallback (if Phase 1 fails)
+   └─> ExploitReasoner.discover_exploits() → RAG query
+   └─> ❌ RETURNS NO EXECUTION METHODS
+   
+4. Phase 3: Credential Bruteforce
+   └─> Hydra on SSH/FTP/SMB/etc.
+```
 
-Heuristic fallback is used only when the LLM response is unavailable or not parseable.
+### Key Files
+- `src/agents/exploitation_agent.py` - Main exploitation logic (3421 lines)
+- `src/agents/enum_vuln_agent.py` - Port/vuln enumeration (1810 lines)
+- `src/agents/postexploit_agent.py` - Post-exploitation (8 phases)
+- `src/agents/reporting_agent.py` - PDF/MD/JSON reports (950 lines)
+- `src/utils/exploit_reasoner.py` - RAG-driven exploit discovery (needs fix)
 
-## LLM Roles
+### Models in Use
+- **qwen2.5:7b** - Default (recon, enum, exploit)
+- **deepseek-r1:8b** - Reasoning (orchestrator decisions)
+- Both Q4 quantized, CPU-only, 8192 context
 
-- OrchestratorAgent: `cyberagent-reasoning:8b`
-  - Mission planning, phase briefings, phase analysis
-  - Uses `get_reasoning_llm(low|medium|high)` for token budgeting
+## Next Development Tasks (Future)
 
-- Specialist agents: `cyberagent-pentest:14b`
-  - Tool-selection and phase-local decisions
-  - Prompt includes wave summary + phase RAG + MITRE context
-  - Outputs are validated before MissionMemory persistence
+1. **searchsploit Integration** - Dynamic CVE → exploit mapping for ANY vulnerability
+2. **Fix ExploitReasoner** - Extract MSF modules from RAG results
+3. **Multi-target Support** - Handle network ranges (10.0.0.0/24)
+4. **Interactive Shell Handling** - Keep sessions alive for manual interaction
+5. **Credential Reuse** - Try found creds across all services
 
-## RAG Integration
+## Testing Checklist
 
-- `get_phase_rag_context(phase, query, n)` drives phase-priority retrieval.
-  - recon → `hacktricks`, `mitre_attack`, `owasp`, `seclists_meta`
-  - enum → `hacktricks`, `nuclei_templates`, `seclists_meta`, `owasp`, `mitre_attack`
-  - vuln → `cve_database`, `nuclei_templates`, `exploitdb`, `owasp`, `hacktricks`
-  - exploit → `exploitdb`, `cve_database`, `payloads`, `hacktricks`, `mitre_attack`
-  - privesc → `privesc_techniques`, `gtfobins`, `exploitdb`, `mitre_attack`, `hacktricks`
-  - postexploit → `mitre_attack`, `gtfobins`, `payloads`, `hacktricks`, `privesc_techniques`
+Before declaring system production-ready:
+- [ ] Full pentest completes without crashes
+- [ ] At least 1 shell obtained on Metasploitable2
+- [ ] PostExploit collects loot (files, hashes, creds)
+- [ ] PDF report generates with findings
+- [ ] Memory state persists correctly
+- [ ] Can resume interrupted missions
+- [ ] Works on other vulnerable VMs (DVWA, HackTheBox, etc.)
 
-- Recon also runs a dedicated MITRE query:
-  - `get_rag_context(..., collections=["mitre_attack"])`
+## Quick Commands
 
-## What Was Built — ReconAgent
+```bash
+# Check latest mission
+ls -lt memory/missions/ | head -3
 
-### `src/agents/recon_agent.py`
+# View mission state
+cat memory/missions/MISSION_ID/state.json | jq '{phase, status, shells: .shells|length, vulns: .vulnerabilities|length}'
 
-Wave-based passive reconnaissance engine with bounded parallelism and dynamic tool availability checks.
+# Resume mission
+python3 main.py --resume MISSION_ID -v
 
-Execution model:
-- Wave 1 baseline passive checks
-- Wave 2-3 selected by `_intelligent_next_wave()`
-- `MAX_CONCURRENT = 5` with CPU backoff via `psutil` (`>80%` → 2 workers)
-- Per-tool timeout overrides (`TOOL_TIMEOUTS`) from 10s to 60s
-
-Decision loop per wave:
-1. Run tools in parallel
-2. Build compact wave summary
-3. Query phase-aware RAG (`phase="recon"`)
-4. Query MITRE ATT&CK context
-5. Ask LLM for JSON decision: `done`, `next_tools`, `reasoning`, `mitre_technique`
-6. Validate tool choices against available+unused whitelist
-7. Fallback to `_heuristic_next_wave()` only on hard failure
-
-Parsing model:
-- Regex extractors only (LLM never parses raw tool output)
-- Outputs stored as structured findings (`hosts`, `technologies`, `osint_intel`, `network_info`, `web_info`)
-- MITRE findings tracked in `mitre_techniques`
-
-MITRE tool mapping in recon:
-- DNS tools → `T1590.002`
-- WHOIS tools → `T1590.001`
-- Certificate transparency → `T1596.003`
-- Subdomain discovery → `T1583.001`
-- TheHarvester → `T1591`
-- Header intelligence → `T1592`
-- Technology fingerprinting → `T1592.002`
-- WAF fingerprinting → `T1590.006`
-
-## Orchestrator ↔ Recon Data Flow
-
-- Recon writes hosts and findings into MissionMemory.
-- Orchestrator reads phase gate evidence from MissionMemory state.
-- Enumeration gate opens only after recon stores concrete host evidence.
-
-## Performance Snapshot
-
-- Internal/lab target recon completes in ~30 seconds under current timeout policy.
-- LLM remains in decision loop with compact prompts and 60s bound.
-
-## Known Minor Issue
-
-- `curl_headers` currently uses `--follow`; some curl builds require `-L`.
-- This does not block recon completion and can be normalized in a follow-up cleanup.
-
-## Next Sprint: EnumerationAgent (S7-S8)
-
-Priority vectors from recon outputs:
-- Service and version enumeration expansion
-- Web stack-specific enumeration paths
-- Method and misconfiguration checks
-- Port/service enrichment for downstream vulnerability scoring
+# Generate report only
+python3 main.py --report-only MISSION_ID
+```
