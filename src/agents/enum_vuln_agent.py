@@ -281,15 +281,18 @@ class EnumVulnAgent(BaseAgent):
         else:
             scanner_name = Path(port_scanner).name
             if scanner_name == "nmap":
-                # Fast scan: --top-ports 1000 for quick results + service detection
-                # Full port scan (-p 1-65535) takes 10+ minutes causing timeouts
+                # IMPORTANT: Include backdoor ports AND top 1000
+                # Port 1524 (ingreslock backdoor), 6667 (UnrealIRCd), and other
+                # common backdoor ports are NOT in top 1000 but are critical
+                BACKDOOR_PORTS = "1524,6667,6697,8787,31337,4444,5555"
                 wave1_args = [
                     self.target, "-sV", "-sC",
                     "--top-ports", "1000",
+                    "-p", BACKDOOR_PORTS,  # Add backdoor ports explicitly
                     "-T4", "--open"
                 ]
             elif scanner_name == "masscan":
-                wave1_args = [self.target, "-p1-1000", "--rate", "1000"]
+                wave1_args = [self.target, "-p1-1000,1524,6667,31337", "--rate", "1000"]
             elif scanner_name == "rustscan":
                 wave1_args = ["-a", self.target, "--ulimit", "5000", "--", "-sV", "-sC", "--open"]
             else:
