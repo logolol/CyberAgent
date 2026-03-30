@@ -281,18 +281,22 @@ class EnumVulnAgent(BaseAgent):
         else:
             scanner_name = Path(port_scanner).name
             if scanner_name == "nmap":
-                # IMPORTANT: Include backdoor ports AND top 1000
-                # Port 1524 (ingreslock backdoor), 6667 (UnrealIRCd), and other
-                # common backdoor ports are NOT in top 1000 but are critical
-                BACKDOOR_PORTS = "1524,6667,6697,8787,31337,4444,5555"
+                # IMPORTANT: nmap -p overrides --top-ports, so we must use -p alone
+                # Comprehensive port list: common services + backdoor ports
+                # This covers top 1000 equivalent + critical backdoor ports
+                SCAN_PORTS = (
+                    "1-1024,"  # Well-known ports (includes most top-1000)
+                    "1099,1433,1521,1524,2049,2121,3306,3389,3632,"  # DB/services/backdoors
+                    "5432,5900,5985,6000,6667,6697,8009,8080,8180,8443,8787,"  # More services
+                    "9000,9090,9200,31337,4444,5555"  # Common backdoors
+                )
                 wave1_args = [
                     self.target, "-sV", "-sC",
-                    "--top-ports", "1000",
-                    "-p", BACKDOOR_PORTS,  # Add backdoor ports explicitly
+                    "-p", SCAN_PORTS,
                     "-T4", "--open"
                 ]
             elif scanner_name == "masscan":
-                wave1_args = [self.target, "-p1-1000,1524,6667,31337", "--rate", "1000"]
+                wave1_args = [self.target, "-p1-1024,1099,1524,2049,3306,3632,5432,5900,6667,8180,31337", "--rate", "1000"]
             elif scanner_name == "rustscan":
                 wave1_args = ["-a", self.target, "--ulimit", "5000", "--", "-sV", "-sC", "--open"]
             else:
