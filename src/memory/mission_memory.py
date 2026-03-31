@@ -201,7 +201,8 @@ class MissionMemory:
         self._state["hosts"][ip]["vulnerabilities"].append(vuln_entry)
         self.save_state()
 
-    def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = ""):
+    def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = "", 
+                  port: int = 0, lport: int = 0):
         valid_types = {
             "shell", "root_shell", "meterpreter", "metasploit", "webshell",
             "reverse_shell", "bind_shell", "bindshell",
@@ -218,12 +219,20 @@ class MissionMemory:
         if not user:
             user = "unknown"
             _log.warning("add_shell: empty user — using 'unknown'")
-        _log.info(f"Shell obtained: {user}@{ip} via {shell_type}")
+        _log.info(f"Shell obtained: {user}@{ip} via {shell_type} (port={port}, lport={lport})")
 
         self._ensure_host(ip)
-        self._state["hosts"][ip]["shells"].append({
-            "type": shell_type, "user": user, "shell_path": shell_path,
-        })
+        shell_entry = {
+            "type": shell_type, 
+            "user": user, 
+            "shell_path": shell_path,
+        }
+        # Store port info if provided
+        if port:
+            shell_entry["port"] = int(port)
+        if lport:
+            shell_entry["lport"] = int(lport)
+        self._state["hosts"][ip]["shells"].append(shell_entry)
         self.save_state()
 
     def add_credential(self, ip: str, username: str = "", password: str = "",

@@ -282,6 +282,8 @@ class OrchestratorAgent(BaseAgent):
                             ip=host_ip,
                             shell_type=s.get("type", "shell"),
                             user=s.get("user", "unknown"),
+                            port=s.get("port", 0),
+                            lport=s.get("lport", 0),
                         )
                     except Exception as _e:
                         self.log_warning(f"Re-sync shell to memory failed: {_e}")
