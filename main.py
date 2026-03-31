@@ -48,27 +48,35 @@ def print_banner():
 
 
 def check_and_update_rag():
+    """
+    Check if RAG databases need updating (24-hour interval).
+    Skip if ChromaDB already exists or marker is fresh.
+    """
     import time
     import subprocess
     
     update_marker = Path(__file__).parent / "memory" / ".last_rag_update"
-    update_script = Path(__file__).parent / "update_rag.sh"
+    chromadb_path = Path(__file__).parent / "memory" / "chromadb"
     
-    needs_update = True
-    if update_marker.exists():
+    # SKIP if ChromaDB already exists AND marker is fresh
+    if chromadb_path.exists() and update_marker.exists():
         age = time.time() - update_marker.stat().st_mtime
         if age < 86400:  # 24 hours
-            needs_update = False
-            
-    if needs_update and update_script.exists():
-        console.print("\n[bold magenta]🔄 24-Hour RAG Intelligence Sync Required...[/]")
-        console.print("[dim]Updating ExploitDB, CVE feeds, MITRE, and ChromaDB embeddings. This may take a few minutes.[/]")
-        try:
-            subprocess.run([str(update_script)], check=True)
-            update_marker.touch()
-            console.print("[bold green]✓ RAG Databases successfully updated & synchronized![/]\n")
-        except Exception as e:
-            console.print(f"[bold red]✗ RAG Auto-Update failed:[/] {e}\n")
+            console.print("[dim]✓ RAG databases up-to-date (checked <24h ago)[/]")
+            return
+    
+    # SKIP if ChromaDB exists but no marker (first-time after build)
+    if chromadb_path.exists() and not update_marker.exists():
+        console.print("[dim]✓ RAG databases detected, skipping initial sync[/]")
+        update_marker.touch()  # Create marker to prevent future checks for 24h
+        return
+    
+    # Only update if ChromaDB missing (fresh install)
+    console.print("\n[bold yellow]⚠️  ChromaDB not found — RAG databases need initialization[/]")
+    console.print("[dim]This is a one-time setup. Run manually:[/]")
+    console.print("[bold cyan]  bash update_rag.sh[/]\n")
+    console.print("[bold red]Aborting pentest — RAG knowledge required![/]")
+    sys.exit(1)
 
 
 def main():
