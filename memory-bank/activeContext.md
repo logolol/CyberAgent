@@ -2,106 +2,116 @@
 
 **Last Updated:** 2026-03-31 (Day 10)
 
-## Current Status: ✅ PRODUCTION READY FOR FULL PENTEST
+## Current Status: ✅ AGI TRANSFORMATION PHASE 1 COMPLETE
 
-### Just Completed (Day 9-10 Stabilization)
-All critical architecture blockers have been resolved:
+### Just Completed (Day 10 AGI Overhaul)
 
-1. ✅ `PrivEscAgent` robust socket thread safety (eliminated `NoneType` crashes).
-2. ✅ `ReportingAgent` dependencies fixed for ReportLab legends.
-3. ✅ Global `pyrightconfig.json` defined to completely silence cascading IDE false-positives.
-4. ✅ **Zero-Touch RAG Sync** integrated directly into `main.py` to auto-fetch CVE/ExploitDB/MITRE updates dynamically without manual CRON config.
+**Major Changes:**
+1. ✅ **FirewallDetectionAgent** — New agent for firewall/IDS/IPS detection and evasion
+2. ✅ **LLM Reasoning Re-enabled** — All bypassed LLM calls now use timeout + fallback pattern
+3. ✅ **Dynamic Exploit Discovery** — msfconsole CVE search + searchsploit integration
+4. ✅ **Security Fixes** — Command injection prevention in tool_manager.py
+5. ✅ **MissionMemory Bug** — Filter `or True` removed
 
-### Verified Working
+### Architecture Philosophy Change
+```
+BEFORE (Day 1-9): Hardcoded logic → (timeout) → LLM fallback
+                  LLM rarely called, system was just a state machine
+
+AFTER (Day 10+):  LLM reasoning → (timeout) → Deterministic fallback
+                  True AGI: LLM always attempts first, fallback for reliability
+```
+
+### New FirewallDetectionAgent Capabilities
+```python
+from agents.firewall_agent import FirewallDetectionAgent, get_evasion_nmap_flags
+
+agent = FirewallDetectionAgent(mission_memory)
+result = agent.run(target="10.0.0.1")
+
+# Result includes:
+# - firewall_score: 0.0-1.0
+# - detected_technologies: ["iptables", "fail2ban", "waf:cloudflare"]
+# - evasion_profile: "none|light|medium|heavy|paranoid"
+# - evasion_config: {nmap_timing, nmap_flags, use_proxy, fragment, delay}
+# - recommendations: ["Use -T2", "Enable fragmentation", ...]
+```
+
+### LLM Timeout Pattern (New Standard)
+```python
+# All agents now use this pattern:
+try:
+    raw = self._llm_with_timeout(prompt, timeout=120)
+    if raw:
+        result = self._extract_json_robust(raw)
+        if result:
+            return result  # LLM succeeded
+except Exception:
+    pass
+    
+# FALLBACK: Deterministic logic
+return self._regex_analysis_fallback()
+```
+
+## Verified Working
 - **Samba exploit:** Root shell in 28s ✅
 - **distccd exploit:** Daemon shell ✅
 - **PHP-CGI detection:** Nuclei finds CVE-2012-1823 ✅
 - **Port enumeration:** All 25 services detected ✅
+- **Firewall detection:** TTL, rate-limit, WAF analysis ✅
 
 ## What to Test Next
 
-### Immediate: Full Pentest Run
+### Full Pentest with Firewall Detection
 ```bash
-# Run with 1-hour timeout to allow completion
-timeout 3600 python3 main.py --target victim-machine --phase full -v 2>&1 | tee full_pentest_$(date +%s).log
+# Run full pentest with firewall pre-check
+python3 -c "
+from src.agents.firewall_agent import FirewallDetectionAgent
+from src.memory.mission_memory import MissionMemory
+mm = MissionMemory('victim-machine')
+fw = FirewallDetectionAgent(mm)
+print(fw.run('victim-machine'))
+"
 
-# Check for shells obtained
-grep -i "shell.*opened\|session.*opened\|SHELL" full_pentest_*.log
+# Then run full pentest
+timeout 3600 python3 main.py --target victim-machine --phase full -v 2>&1 | tee pentest_$(date +%s).log
 ```
 
-### Expected Results
-- ✅ Phase 0: No bindshells (port 1524 closed on this target)
-- ✅ Phase 1: Samba exploit should succeed → root shell
-- ✅ Phase 1: distccd exploit should succeed → daemon shell
-- ✅ Phase 2: PostExploit should loot credentials, enumerate system
-- ✅ Phase 3: Report should generate PDF with findings
+## Key Files Changed (Day 10)
+- `src/agents/firewall_agent.py` — NEW: 900+ lines
+- `src/agents/exploitation_agent.py` — msfconsole CVE search
+- `src/agents/enum_vuln_agent.py` — LLM re-enabled (3 places)
+- `src/utils/exploit_reasoner.py` — LLM re-enabled (2 places)
+- `src/mcp/tool_manager.py` — Input validation
+- `src/memory/mission_memory.py` — Filter bug fix
+- `src/prompts/agent_prompts.py` — Firewall agent prompt
 
-## Known Issues (Low Priority)
+## Remaining AGI Tasks (Future)
 
-- None significant. The `pyrightconfig.json` environment accurately resolves `src/` module indices, and system reliability is very high.
+### Phase 2: Tool Intelligence
+- [ ] Replace TOOL_PRIORITY_SCORE with LLM selection
+- [ ] Implement tool success tracking
+- [ ] LLM-based tool output parsing
 
-## Architecture Overview
+### Phase 3: Learning
+- [ ] Exploit success learning (MissionMemory technique_success)
+- [ ] Post-mission analysis for next targets
+- [ ] Replace hardcoded remediations with LLM
 
-### Exploitation Flow
-```
-1. Phase 0: Direct Access (bindshells, anon FTP, rsh)
-   └─> _try_bindshell(), _try_anon_ftp(), _try_rsh()
-   
-2. Phase 1: KNOWN_EXPLOITS Fast-Path (14 exploits)
-   └─> CVE match → MSF module → _execute_known_exploit()
-   └─> ✅ RELIABLE & TESTED
-   
-3. Phase 2: AGI Fallback (if Phase 1 fails)
-   └─> ExploitReasoner.discover_exploits() → RAG query
-   └─> ❌ RETURNS NO EXECUTION METHODS
-   
-4. Phase 3: Credential Bruteforce
-   └─> Hydra on SSH/FTP/SMB/etc.
-```
-
-### Key Files
-- `src/agents/exploitation_agent.py` - Main exploitation logic (3421 lines)
-- `src/agents/enum_vuln_agent.py` - Port/vuln enumeration (1810 lines)
-- `src/agents/postexploit_agent.py` - Post-exploitation (8 phases)
-- `src/agents/reporting_agent.py` - PDF/MD/JSON reports (950 lines)
-- `src/utils/exploit_reasoner.py` - RAG-driven exploit discovery (needs fix)
-
-### Models in Use
-- **qwen2.5:7b** - Default (recon, enum, exploit)
-- **deepseek-r1:8b** - Reasoning (orchestrator decisions)
-- Both Q4 quantized, CPU-only, 8192 context
-
-## Next Development Tasks (Future)
-
-1. **searchsploit Integration** - Dynamic CVE → exploit mapping for ANY vulnerability
-2. **Fix ExploitReasoner** - Extract MSF modules from RAG results
-3. **Multi-target Support** - Handle network ranges (10.0.0.0/24)
-4. **Interactive Shell Handling** - Keep sessions alive for manual interaction
-5. **Credential Reuse** - Try found creds across all services
-
-## Testing Checklist
-
-Before declaring system production-ready:
-- [ ] Full pentest completes without crashes
-- [ ] At least 1 shell obtained on Metasploitable2
-- [ ] PostExploit collects loot (files, hashes, creds)
-- [ ] PDF report generates with findings
-- [ ] Memory state persists correctly
-- [ ] Can resume interrupted missions
-- [ ] Works on other vulnerable VMs (DVWA, HackTheBox, etc.)
+### Phase 4: Evasion
+- [ ] Integrate proxychains into nmap/hydra calls
+- [ ] Apply nmap evasion profiles from FirewallDetectionAgent
+- [ ] Timing randomization
 
 ## Quick Commands
 
 ```bash
-# Check latest mission
-ls -lt memory/missions/ | head -3
+# Test firewall detection
+python3 -c "from src.agents.firewall_agent import FirewallDetectionAgent; from src.memory.mission_memory import MissionMemory; FirewallDetectionAgent(MissionMemory('test')).run('victim-machine')"
 
-# View mission state
-cat memory/missions/MISSION_ID/state.json | jq '{phase, status, shells: .shells|length, vulns: .vulnerabilities|length}'
+# Check LLM working
+curl -s http://localhost:11434/api/generate -d '{"model":"cyberagent-pentest:7b","prompt":"What CVE affects vsftpd 2.3.4?","stream":false}' | jq -r .response | head -5
 
-# Resume mission
-python3 main.py --resume MISSION_ID -v
-
-# Generate report only
-python3 main.py --report-only MISSION_ID
+# Validate all agents compile
+python3 -m py_compile src/agents/*.py src/utils/*.py src/mcp/*.py && echo "✅ All OK"
 ```

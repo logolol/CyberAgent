@@ -1028,10 +1028,26 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"risk_summary":"string","attack_priority":"string","mitre_chain":["T1046","T1190"]}'
         )
 
-        # DETERMINISTIC: Skip LLM analysis to avoid 300s blocking timeout.
-        # Use regex-based analysis which extracts ports/vulns from tool output.
-        # The RAG context is still valuable for enriching findings later.
-        self.log_info("Running deterministic vulnerability analysis (regex + RAG)...")
+        # TRY LLM FIRST with timeout, THEN fall back to regex
+        # This preserves AGI capability while avoiding blocking
+        self.log_info("Attempting LLM vulnerability analysis (120s timeout)...")
+        
+        try:
+            raw = self._llm_with_timeout(prompt, timeout=120)
+            if raw and raw.strip():
+                analysis = self._extract_json_robust(raw)
+                if analysis and isinstance(analysis, dict):
+                    # Validate the LLM response has useful content
+                    if analysis.get("ports") or analysis.get("vulnerabilities"):
+                        self.log_info(f"✓ LLM analysis complete: {len(analysis.get('vulnerabilities', []))} vulns found")
+                        return analysis
+                    else:
+                        self.log_warning("LLM returned empty analysis, falling back to regex")
+        except Exception as e:
+            self.log_warning(f"LLM analysis failed: {e}")
+        
+        # FALLBACK: Regex-based analysis
+        self.log_info("Running regex-based vulnerability analysis (fallback)...")
         return self._regex_analysis_fallback()
 
     def _plan_initial_attack(self) -> dict[str, Any]:
@@ -1831,10 +1847,22 @@ Use only evidence above — do not invent:
                                 break
             return None
 
-        # DETERMINISTIC: Skip LLM exploitability reasoning to avoid 300s blocking.
-        # Use CVSS-based heuristic that marks high-CVSS confirmed CVEs as exploitable.
-        self.log_info("Using CVSS-based exploitability heuristic (no LLM)")
+        # TRY LLM for exploitability reasoning with timeout
+        self.log_info("Attempting LLM exploitability reasoning (90s timeout)...")
         batch_result = None
+        
+        try:
+            raw = self._llm_with_timeout(prompt, timeout=90)
+            if raw and raw.strip():
+                batch_result = _extract_json_array(raw)
+                if batch_result:
+                    self.log_info(f"✓ LLM exploitability analysis: {len(batch_result)} vulns evaluated")
+        except Exception as e:
+            self.log_warning(f"LLM exploitability reasoning failed: {e}")
+        
+        # FALLBACK: CVSS-based heuristic
+        if not batch_result:
+            self.log_info("Using CVSS-based exploitability heuristic (fallback)")
 
         if isinstance(batch_result, list):
             result_map = {
@@ -2034,42 +2062,76 @@ Use only evidence above — do not invent:
         elif stats["medium"] > 0:
             risk_score = "medium"
 
-        # DETERMINISTIC: Skip LLM critical path analysis to avoid 240s timeout.
-        # Build attack path from sorted vulns by severity and exploitability.
+        # TRY LLM for critical path analysis with timeout
         attack_summary = {}
+        
         if cleaned_vulns:
-            # Sort vulns: exploitable first, then by CVSS score
-            sorted_vulns = sorted(
-                [v for v in cleaned_vulns if isinstance(v, dict)],
-                key=lambda v: (
-                    not v.get("exploitable", False),  # exploitable first
-                    -float(v.get("cvss_score", 0) or 0),  # higher CVSS first
-                ),
+            # Build prompt for LLM attack path analysis
+            vuln_summary = json.dumps(
+                [{"cve": v.get("cve"), "service": v.get("service"), 
+                  "cvss": v.get("cvss_score"), "exploitable": v.get("exploitable")}
+                 for v in cleaned_vulns[:10]],
+                indent=2
             )
             
-            if sorted_vulns:
-                top = sorted_vulns[0]
-                attack_summary = {
-                    "critical_path": {
-                        "service": str(top.get("service", "unknown")),
-                        "port": int(top.get("port", 0) or 0),
-                        "cve": str(top.get("cve", "CVE-UNKNOWN")),
-                        "confidence": str(top.get("confidence", "medium")),
-                        "why_first": f"Highest priority: CVSS {top.get('cvss_score', 0)}, exploitable={top.get('exploitable')}",
-                    },
-                    "all_attack_vectors": [
-                        {
-                            "service": str(v.get("service", "")),
-                            "vector_type": str(v.get("title", "")),
-                            "priority": i + 1,
-                            "requires": "standard exploitation",
-                        }
-                        for i, v in enumerate(sorted_vulns[:5])
-                    ],
-                    "recommended_exploits": [
-                        str(v.get("cve", "")) for v in sorted_vulns[:3]
-                        if v.get("cve", "").startswith("CVE-")
-                    ],
+            attack_prompt = f"""Given these vulnerabilities on target {self.target}:
+{vuln_summary}
+
+Recommend the optimal attack path. Consider:
+1. Which vulnerability gives initial access fastest?
+2. What's the escalation path to root?
+3. Which exploits are most reliable?
+
+Return JSON:
+{{"critical_path":{{"service":"","port":0,"cve":"","why_first":""}},
+"attack_sequence":["step1","step2"],"confidence":"high|medium|low"}}"""
+            
+            try:
+                self.log_info("Attempting LLM attack path analysis (60s timeout)...")
+                raw = self._llm_with_timeout(attack_prompt, timeout=60)
+                if raw:
+                    llm_attack = self._extract_json_robust(raw)
+                    if llm_attack and isinstance(llm_attack, dict) and llm_attack.get("critical_path"):
+                        attack_summary = llm_attack
+                        self.log_info("✓ LLM attack path analysis complete")
+            except Exception as e:
+                self.log_warning(f"LLM attack path analysis failed: {e}")
+            
+            # FALLBACK: Build attack path from sorted vulns by severity and exploitability
+            if not attack_summary:
+                self.log_info("Using heuristic attack path (fallback)")
+                # Sort vulns: exploitable first, then by CVSS score
+                sorted_vulns = sorted(
+                    [v for v in cleaned_vulns if isinstance(v, dict)],
+                    key=lambda v: (
+                        not v.get("exploitable", False),  # exploitable first
+                        -float(v.get("cvss_score", 0) or 0),  # higher CVSS first
+                    ),
+                )
+                
+                if sorted_vulns:
+                    top = sorted_vulns[0]
+                    attack_summary = {
+                        "critical_path": {
+                            "service": str(top.get("service", "unknown")),
+                            "port": int(top.get("port", 0) or 0),
+                            "cve": str(top.get("cve", "CVE-UNKNOWN")),
+                            "confidence": str(top.get("confidence", "medium")),
+                            "why_first": f"Highest priority: CVSS {top.get('cvss_score', 0)}, exploitable={top.get('exploitable')}",
+                        },
+                        "all_attack_vectors": [
+                            {
+                                "service": str(v.get("service", "")),
+                                "vector_type": str(v.get("title", "")),
+                                "priority": i + 1,
+                                "requires": "standard exploitation",
+                            }
+                            for i, v in enumerate(sorted_vulns[:5])
+                        ],
+                        "recommended_exploits": [
+                            str(v.get("cve", "")) for v in sorted_vulns[:3]
+                            if v.get("cve", "").startswith("CVE-")
+                        ],
                     "evasion_needed": bool(self._security_controls.get("firewall")),
                     "exploitation_guidance": f"Target {len([v for v in sorted_vulns if v.get('exploitable')])} exploitable vulns in priority order",
                 }

@@ -405,8 +405,9 @@ class MissionMemory:
         return self._state["hosts"]
 
     def get_phase_summary(self, phase: str) -> list[dict]:
+        """Get attack chain entries relevant to a specific phase."""
         return [s for s in self._state["attack_chain"]
-                if f"phase_change → {phase}" in s["action"] or True]
+                if f"phase_change → {phase}" in s.get("action", "")]
 
     def get_full_context(self) -> str:
         """Return full mission state as text for LLM injection."""

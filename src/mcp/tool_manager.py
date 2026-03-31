@@ -744,7 +744,48 @@ JSON argument list:"""
         """
         Generate Metasploit arguments based on service/CVE.
         Uses LLM to select the best module when available.
+        
+        SECURITY: All user inputs are validated to prevent command injection.
         """
+        import shlex
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # INPUT VALIDATION - Prevent command injection
+        # ══════════════════════════════════════════════════════════════════════
+        def validate_ip_or_host(value: str) -> str:
+            """Validate IP address or hostname - no shell metacharacters."""
+            if not value:
+                raise ValueError("Empty target")
+            # Allow only: alphanumeric, dots, hyphens, underscores
+            if not re.match(r'^[\w\.\-]+$', value):
+                raise ValueError(f"Invalid characters in: {value}")
+            return value
+        
+        def validate_port(value: int) -> int:
+            """Validate port number."""
+            if not isinstance(value, int) or value < 1 or value > 65535:
+                raise ValueError(f"Invalid port: {value}")
+            return value
+        
+        def validate_module(value: str) -> str:
+            """Validate Metasploit module path."""
+            if not value:
+                return value
+            # Module paths are like: exploit/unix/ftp/vsftpd_234_backdoor
+            if not re.match(r'^[\w/\-]+$', value):
+                raise ValueError(f"Invalid module path: {value}")
+            return value
+        
+        # Validate all inputs
+        try:
+            target = validate_ip_or_host(target)
+            port = validate_port(port)
+            lhost = validate_ip_or_host(lhost) if lhost else "127.0.0.1"
+            lport = validate_port(lport) if lport else 4444
+        except ValueError as e:
+            _log.error(f"Input validation failed: {e}")
+            return ["-q", "-x", "echo 'Invalid input'; exit 1"]
+        
         # Module database for common exploits
         MSF_MODULES = {
             # FTP
@@ -809,7 +850,13 @@ Return ONLY the module path (e.g., exploit/unix/ftp/vsftpd_234_backdoor), nothin
             else:
                 module = "auxiliary/scanner/portscan/tcp"
         
-        # Build msfconsole command
+        # Validate module path
+        try:
+            module = validate_module(module)
+        except ValueError:
+            module = "auxiliary/scanner/portscan/tcp"
+        
+        # Build msfconsole command - inputs are now validated
         msf_cmd = (
             f"use {module}; "
             f"set RHOSTS {target}; "
