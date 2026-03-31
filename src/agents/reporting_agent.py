@@ -107,6 +107,7 @@ class ReportingAgent(BaseAgent):
         self.mission_id = ""
         self.start_time = ""
         self.end_time = ""
+        self.root_obtained = False  # Initialize to prevent AttributeError
 
     def run(self, target: str, briefing: dict = {}) -> dict:
         """
@@ -223,6 +224,9 @@ class ReportingAgent(BaseAgent):
             f"Extracted: {len(self.vulns)} vulns, {len(self.credentials)} creds, "
             f"{len(self.shells)} shells, {len(self.loot)} loot items"
         )
+        
+        # Set root_obtained flag
+        self.root_obtained = any(s.get("user") == "root" for s in self.shells)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Phase 2: AI Analysis
