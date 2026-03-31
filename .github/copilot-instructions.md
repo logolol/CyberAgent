@@ -85,4 +85,5 @@ paths = te.run_gobuster("http://10.0.0.1", "/usr/share/wordlists/dirb/common.txt
 - **Phase transitions** — only Orchestrator calls `mm.update_phase(phase)`
 - **CPU-only inference** — Q4 quantized models, max `num_ctx=8192`, no GPU
 - **No external APIs** — all inference local via Ollama at http://localhost:11434
-
+- **Global Static Analysis** — always respect the `pyrightconfig.json` standard explicitly pointing to `src/`; do not suggest local IDE sys.path hacks.
+- **Zero-Touch DB Init** — RAG updates are handled organically in `main.py` via `check_and_update_rag()`. Never advise creating manual CRON jobs.
