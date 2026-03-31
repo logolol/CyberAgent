@@ -33,7 +33,26 @@ def run():
         t0 = time.time()
         try:
             mod = importlib.import_module(module_name)
-            count = mod.run()
+            force = "--force" in sys.argv
+            
+            # Auto-detect the right function (run, or ingest_*)
+            func = getattr(mod, "run", None)
+            if not func:
+                for attr in dir(mod):
+                    if attr.startswith("ingest_") and callable(getattr(mod, attr)):
+                        func = getattr(mod, attr)
+                        break
+            
+            if not func:
+                raise ValueError(f"No entry point found in {module_name}")
+                
+            import inspect
+            sig = inspect.signature(func)
+            if "skip_if_populated" in sig.parameters:
+                count = func(skip_if_populated=not force)
+            else:
+                count = func()
+                
             elapsed = time.time() - t0
             results.append((col_name, count or 0, elapsed, "✓"))
             total_docs += count or 0
