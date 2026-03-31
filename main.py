@@ -47,6 +47,30 @@ def print_banner():
     ))
 
 
+def check_and_update_rag():
+    import time
+    import subprocess
+    
+    update_marker = Path(__file__).parent / "memory" / ".last_rag_update"
+    update_script = Path(__file__).parent / "update_rag.sh"
+    
+    needs_update = True
+    if update_marker.exists():
+        age = time.time() - update_marker.stat().st_mtime
+        if age < 86400:  # 24 hours
+            needs_update = False
+            
+    if needs_update and update_script.exists():
+        console.print("\n[bold magenta]🔄 24-Hour RAG Intelligence Sync Required...[/]")
+        console.print("[dim]Updating ExploitDB, CVE feeds, MITRE, and ChromaDB embeddings. This may take a few minutes.[/]")
+        try:
+            subprocess.run([str(update_script)], check=True)
+            update_marker.touch()
+            console.print("[bold green]✓ RAG Databases successfully updated & synchronized![/]\n")
+        except Exception as e:
+            console.print(f"[bold red]✗ RAG Auto-Update failed:[/] {e}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="CyberAgent — Autonomous Multi-Agent Pentest Platform",
@@ -100,6 +124,9 @@ def main():
         parser.error("Provide --target, --resume, or --report-only")
 
     print_banner()
+    
+    # ── Run Zero-Touch Intelligence Sync ──────────────────────────────────────
+    check_and_update_rag()
 
     # ── Pre-warm LLM model ────────────────────────────────────────────────────
     # Load the SINGLE unified model into Ollama's RAM.
