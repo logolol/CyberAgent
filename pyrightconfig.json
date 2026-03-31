@@ -1,9 +1,9 @@
 {
   "include": ["src", "main.py", "validate_env.py"],
-  "extraPaths": ["src"],
+  "extraPaths": ["/home/drakarys/CyberAgent/src"],
   "pythonVersion": "3.11",
   "pythonPlatform": "Linux",
-  "venvPath": ".",
+  "venvPath": "/home/drakarys/CyberAgent",
   "venv": ".venv",
   "typeCheckingMode": "basic",
   "reportMissingImports": "warning",
@@ -16,6 +16,5 @@
   "reportOperatorIssue": "none",
   "reportAttributeAccessIssue": "none",
   "reportReturnType": "none",
-  "reportFunctionMemberAccess": "none",
-  "stubPath": "src"
+  "reportFunctionMemberAccess": "none"
 }

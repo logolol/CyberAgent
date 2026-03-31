@@ -39,6 +39,7 @@ from reportlab.platypus import (
 from reportlab.graphics.shapes import Drawing, Rect, String, Line
 from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.legends import Legend
 
 _SRC = Path(__file__).parent.parent
 if str(_SRC) not in sys.path:
@@ -725,3 +726,370 @@ Impact Assessment:
         
         # Count by severity
         counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        for v in self.vulns:
+            sev = self._cvss_to_severity(v.get("cvss", 0)).capitalize()
+            if sev in counts:
+                counts[sev] += 1
+            else:
+                counts["Low"] += 1
+                
+        drawing = Drawing(400, 200)
+        pie = Pie()
+        pie.x = 100
+        pie.y = 50
+        pie.width = 100
+        pie.height = 100
+        
+        data = []
+        labels = []
+        chart_colors = []
+        
+        if counts["Critical"] > 0:
+            data.append(counts["Critical"])
+            labels.append(f"Critical ({counts['Critical']})")
+            chart_colors.append(colors.HexColor("#ff0000"))
+            
+        if counts["High"] > 0:
+            data.append(counts["High"])
+            labels.append(f"High ({counts['High']})")
+            chart_colors.append(colors.HexColor("#ff6600"))
+            
+        if counts["Medium"] > 0:
+            data.append(counts["Medium"])
+            labels.append(f"Medium ({counts['Medium']})")
+            chart_colors.append(colors.HexColor("#ffcc00"))
+            
+        if counts["Low"] > 0:
+            data.append(counts["Low"])
+            labels.append(f"Low/Info ({counts['Low']})")
+            chart_colors.append(colors.HexColor("#33cc33"))
+            
+        if not data:
+            return None
+            
+        pie.data = data
+        pie.labels = labels
+        pie.slices.strokeColor = colors.white
+        pie.slices.strokeWidth = 1
+        
+        for i, color in enumerate(chart_colors):
+            pie.slices[i].fillColor = color
+            
+        pie.sideLabels = 1
+        
+        drawing.add(pie)
+        
+        # Add legend
+        legend = Legend()
+        legend.x = 250
+        legend.y = 100
+        legend.dx = 10
+        legend.dy = 10
+        legend.colorNamePairs = list(zip(chart_colors, labels))
+        drawing.add(legend)
+        
+        return drawing
+
+    def _cvss_to_severity(self, cvss: float) -> str:
+        """Convert CVSS score to standard severity label."""
+        try:
+            score = float(cvss)
+            if score >= 9.0: return "critical"
+            if score >= 7.0: return "high"
+            if score >= 4.0: return "medium"
+            if score > 0.0:  return "low"
+            return "info"
+        except (ValueError, TypeError):
+            return "unknown"
+
+    def _pdf_vuln_table(self, styles) -> list:
+        """Generate vulnerability detail tables for PDF."""
+        elements = []
+        if not self.vulns:
+            elements.append(Paragraph("No confirmed vulnerabilities logged.", styles['Normal']))
+            return elements
+
+        # Sort vulns by CVSS descending
+        sorted_vulns = sorted(
+            self.vulns,
+            key=lambda x: float(x.get("cvss", 0)) if str(x.get("cvss", "")).replace(".","",1).isdigit() else 0.0,
+            reverse=True
+        )
+
+        for i, v in enumerate(sorted_vulns, 1):
+            cve = v.get("cve", "CVE-UNKNOWN")
+            cvss = v.get("cvss", "N/A")
+            service = v.get("service", "Unknown")
+            port = str(v.get("port", "N/A"))
+            exploitable = "Yes" if v.get("exploitable") else "Unconfirmed"
+            
+            data = [
+                ["Vulnerability ID", cve],
+                ["CVSS Score", str(cvss)],
+                ["Service / Port", f"{service} / {port}"],
+                ["Exploitable", exploitable]
+            ]
+            
+            t = RLTable(data, colWidths=[2*inch, 4*inch])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (0,-1), colors.HexColor("#f0f0f0")),
+                ('TEXTCOLOR', (0,0), (-1,-1), colors.black),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('PADDING', (0,0), (-1,-1), 6),
+            ]))
+            
+            elements.append(Paragraph(f"{i}. {cve} - {service}", styles['Heading3']))
+            elements.append(t)
+            elements.append(Spacer(1, 10))
+
+        return elements
+
+    def _pdf_credentials_table(self, styles) -> list:
+        """Generate credentials table for PDF."""
+        if not self.credentials:
+            return [Paragraph("No credentials harvested.", styles['Normal'])]
+            
+        data = [["Service", "Username", "Password/Hash", "Source"]]
+        
+        for cred in self.credentials:
+            pwd = str(cred.get("password", ""))
+            if len(pwd) > 30:
+                pwd = pwd[:27] + "..."
+            data.append([
+                cred.get("service", "unknown"),
+                cred.get("username", "unknown"),
+                pwd,
+                cred.get("source", "unknown")
+            ])
+            
+        t = RLTable(data, colWidths=[1.5*inch, 1.5*inch, 2*inch, 1.5*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2c3e50")),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor("#f9f9f9")]),
+        ]))
+        
+        return [t]
+
+    def _pdf_loot_table(self, styles) -> list:
+        """Generate loot table for PDF."""
+        if not self.loot:
+            return []
+            
+        data = [["Type", "Source", "Preview"]]
+        
+        for item in self.loot[:10]: # Limit to 10 for size
+            content = str(item.get("content", ""))
+            if len(content) > 40:
+                content = content[:37] + "..."
+            data.append([
+                item.get("type", "unknown"),
+                item.get("source", "unknown"),
+                content
+            ])
+            
+        t = RLTable(data, colWidths=[1.5*inch, 2*inch, 3*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2c3e50")),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor("#f9f9f9")]),
+        ]))
+        
+        elements = [Paragraph("Recovered Files & Loot:", styles['Heading3']), Spacer(1, 5), t]
+        return elements
+
+    def _pdf_mitre_table(self, styles) -> list:
+        """Generate MITRE ATT&CK table for PDF."""
+        if not self.mitre_techniques:
+            return [Paragraph("No MITRE techniques recorded.", styles['Normal'])]
+            
+        data = [["Technique ID", "Description"]]
+        
+        tech_map = {
+            "T1110": "Brute Force",
+            "T1059": "Command and Scripting Interpreter",
+            "T1083": "File and Directory Discovery",
+            "T1046": "Network Service Scanning",
+            "T1190": "Exploit Public-Facing Application",
+            "T1068": "Exploitation for Privilege Escalation",
+            "T1003": "OS Credential Dumping",
+            "T1552": "Unsecured Credentials",
+        }
+        
+        for t_id in self.mitre_techniques:
+            base_id = t_id.split('.')[0]
+            desc = tech_map.get(base_id, "Technique Execution")
+            data.append([t_id, desc])
+            
+        t = RLTable(data, colWidths=[2*inch, 4*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.darkblue),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ]))
+        
+        return [t]
+
+    def _pdf_remediation_table(self, styles, recommendations: list) -> list:
+        """Generate remediation recommendations list for PDF."""
+        elements = []
+        if not recommendations:
+            elements.append(Paragraph("Standard hardening recommended. Apply latest patches.", styles['Normal']))
+            return elements
+
+        for i, rec in enumerate(recommendations, 1):
+            title = rec.get("title", f"Recommendation #{i}")
+            details = rec.get("details", "")
+            
+            elements.append(Paragraph(f"{i}. {title}", styles['Heading3']))
+            if details:
+                elements.append(Paragraph(details, styles['Normal']))
+            elements.append(Spacer(1, 10))
+            
+        return elements
+
+    def _generate_markdown_report(self, ai_analysis: dict) -> Path:
+        """Generate detailed Markdown report."""
+        report_path = self.report_dir / "pentest_report.md"
+        
+        md = f"# Penetration Test Report: {self.target}\n\n"
+        md += f"**Mission ID:** `{self.mission_id}`  \n"
+        md += f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n"
+        md += f"**Agent:** CyberAgent PentestAI\n\n"
+        
+        # High Level Summary
+        md += "## 1. Executive Summary\n\n"
+        md += f"{ai_analysis.get('executive_summary', 'No summary generated.')}\n\n"
+        
+        md += "### Metrics\n"
+        md += f"- **Vulnerabilities Found:** {len(self.vulns)}\n"
+        md += f"- **Shells Obtained:** {len(self.shells)}\n"
+        md += f"- **Credentials Harvested:** {len(self.credentials)}\n"
+        md += f"- **Target Compromised:** {'Yes (Root)' if self.root_obtained else ('Yes (User)' if self.shells else 'No')}\n\n"
+        
+        # Attack Chain
+        md += "## 2. Attack Narrative\n\n"
+        md += f"{ai_analysis.get('attack_narrative', 'No narrative generated.')}\n\n"
+        
+        # Vulnerabilities
+        md += "## 3. Vulnerabilities Discovered\n\n"
+        if not self.vulns:
+            md += "No vulnerabilities logged.\n\n"
+        else:
+            md += "| CVE | Score | Severity | Service/Port | Exploitable |\n"
+            md += "|---|---|---|---|---|\n"
+            for v in self.vulns:
+                cve = v.get("cve", "CVE-UNKNOWN")
+                cvss = v.get("cvss", 0)
+                sev = self._cvss_to_severity(cvss).upper()
+                svc = v.get("service", "unknown")
+                port = v.get("port", "unknown")
+                expl = "✅ Yes" if v.get("exploitable") else "Unconfirmed"
+                md += f"| **{cve}** | {cvss} | {sev} | {svc}/{port} | {expl} |\n"
+            md += "\n"
+            
+        # Shells & PrivEsc
+        md += "## 4. Shells & Persistence\n\n"
+        if not self.shells:
+            md += "No shells obtained.\n\n"
+        else:
+            for s in self.shells:
+                md += f"- **Host:** `{s.get('ip')}`\n"
+                md += f"  - **Type:** `{s.get('type')}`\n"
+                md += f"  - **User:** `{s.get('user')}`\n"
+                md += f"  - **Root:** {'✅ Yes' if s.get('is_root') else '❌ No'}\n"
+            md += "\n"
+            
+        # Credentials
+        md += "## 5. Harvested Credentials\n\n"
+        if not self.credentials:
+            md += "No credentials captured.\n\n"
+        else:
+            md += "| Service | Username | Password/Hash | Source |\n"
+            md += "|---|---|---|---|\n"
+            for c in self.credentials:
+                pwd = str(c.get('password', ''))
+                if len(pwd) > 50: pwd = pwd[:47] + "..."
+                md += f"| {c.get('service')} | `{c.get('username')}` | `{pwd}` | {c.get('source')} |\n"
+            md += "\n"
+            
+        # MITRE
+        md += "## 6. MITRE ATT&CK Matrix\n\n"
+        for t in self.mitre_techniques:
+            md += f"- `{t}`\n"
+        md += "\n"
+        
+        # Remediation
+        md += "## 7. Remediation Recommendations\n\n"
+        recs = ai_analysis.get("remediation_recommendations", [])
+        if not recs:
+            md += "Standard system hardening applies.\n"
+        else:
+            for i, r in enumerate(recs, 1):
+                md += f"### {i}. {r.get('title', 'Recommendation')}\n"
+                md += f"{r.get('details', '')}\n\n"
+                
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(md)
+            
+        self.log_success(f"Markdown report generated: {report_path}")
+        return report_path
+        
+    def _generate_json_summary(self, ai_analysis: dict) -> Path:
+        """Generate structured JSON payload of the entire parsed mission."""
+        summary = {
+            "mission_id": self.mission_id,
+            "target": self.target,
+            "timestamp": datetime.now().isoformat(),
+            "status": "compromised" if self.shells else "scanned",
+            "root_obtained": self.root_obtained,
+            "metrics": {
+                "vulns_count": len(self.vulns),
+                "shells_count": len(self.shells),
+                "credentials_count": len(self.credentials)
+            },
+            "findings": {
+                "vulnerabilities": self.vulns,
+                "shells": self.shells,
+                "credentials": self.credentials,
+                "loot": [ {k: v for k, v in l.items() if k != "content"} for l in self.loot ]
+            },
+            "mitre_attack": self.mitre_techniques,
+            "ai_analysis": ai_analysis
+        }
+        
+        json_path = self.report_dir / "pentest_summary.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+            
+        return json_path
+
+    def _build_result(self, pdf_path: Path, md_path: Path, json_path: Path, analysis: dict) -> dict:
+        """Build final return dictionary for orchestrator."""
+        return {
+            "agent": self.agent_name,
+            "success": True,
+            "result": {
+                "report_paths": {
+                    "pdf": str(pdf_path),
+                    "markdown": str(md_path),
+                    "json": str(json_path)
+                },
+                "executive_summary": analysis.get("executive_summary", ""),
+                "compromised": len(self.shells) > 0,
+                "root_obtained": self.root_obtained,
+                "next_agent": None
+            }
+        }
+
