@@ -644,6 +644,11 @@ class OrchestratorAgent(BaseAgent):
         }
         self.memory.log_action("Orchestrator", "initial_planning", str(planning_result))
 
+        # ── STEP 2.5: Firewall Detection (optional, runs before recon) ─────────
+        # This step detects firewalls/IDS and sets evasion profile in MissionMemory.
+        # All subsequent phases will adapt their scanning behavior accordingly.
+        self._run_firewall_detection(target)
+
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
         phases_to_run = self._get_phases_to_run(phase)
 
@@ -714,6 +719,75 @@ class OrchestratorAgent(BaseAgent):
 
         # ── STEP 4: Mission summary ───────────────────────────────────────────
         return self._print_summary(target)
+
+    # ── Firewall Detection (Pre-Recon) ────────────────────────────────────────
+
+    def _run_firewall_detection(self, target: str) -> None:
+        """
+        Run FirewallDetectionAgent before recon to detect IDS/firewalls.
+        Sets evasion profile in MissionMemory for use by all subsequent agents.
+        """
+        try:
+            self.console.print(Panel(
+                "[bold yellow]▶  PRE-PHASE: FIREWALL DETECTION[/]\n"
+                "[dim]Analyzing target for firewalls, IDS, and rate limiting...[/]",
+                border_style="yellow",
+            ))
+            
+            # Dynamic import to avoid circular dependencies
+            from agents.firewall_agent import FirewallDetectionAgent
+            
+            firewall_agent = FirewallDetectionAgent(mission_memory=self.memory)
+            result = firewall_agent.run(target=target, quick_scan=True)
+            
+            if result.get("success"):
+                profile = result.get("result", {}).get("recommended_profile", "none")
+                detected = result.get("result", {}).get("detected_firewalls", [])
+                config = result.get("result", {}).get("evasion_config", {})
+                
+                # Store in MissionMemory for other agents
+                self.memory.set_evasion_config(
+                    profile=profile,
+                    config=config,
+                    detected_firewalls=detected,
+                )
+                
+                # Display result
+                if profile != "none":
+                    firewall_list = ", ".join(detected) if detected else "unknown"
+                    self.console.print(Panel(
+                        f"[yellow]⚠ Firewalls detected: {firewall_list}[/]\n"
+                        f"[cyan]Evasion profile: {profile.upper()}[/]\n"
+                        f"[dim]All scans will use stealth techniques[/]",
+                        title="[yellow]FIREWALL DETECTION COMPLETE[/]",
+                        border_style="yellow",
+                    ))
+                else:
+                    self.console.print(Panel(
+                        "[green]✓ No firewalls detected[/]\n"
+                        "[dim]Using aggressive scan timing[/]",
+                        title="[green]FIREWALL DETECTION COMPLETE[/]",
+                        border_style="green",
+                    ))
+                
+                self.memory.log_action(
+                    "Orchestrator",
+                    "firewall_detection",
+                    f"profile={profile}, detected={detected}"
+                )
+            else:
+                # Detection failed — default to light evasion for safety
+                self.log_warning("Firewall detection failed — using light evasion as fallback")
+                self.memory.set_evasion_config(
+                    profile="light",
+                    config={"nmap_timing": "-T3", "nmap_flags": ["--max-retries", "2"]},
+                    detected_firewalls=["unknown (detection failed)"],
+                )
+                
+        except ImportError as e:
+            self.log_warning(f"FirewallDetectionAgent not available: {e}")
+        except Exception as e:
+            self.log_warning(f"Firewall detection error: {e} — proceeding without evasion")
 
     # ── Phase helpers ─────────────────────────────────────────────────────────
 
@@ -1315,6 +1389,11 @@ Return JSON:
             table.add_row(phase_name.title(), f"[{color}]{detail}[/]")
 
         self.console.print(table)
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # POST-MISSION LEARNING: Analyze what worked and what didn't
+        # ══════════════════════════════════════════════════════════════════════
+        self._post_mission_analysis(target, root_obtained)
 
         return {
             "mission_id": self.memory.mission_id,
@@ -1324,3 +1403,113 @@ Return JSON:
             "report_path": report_path,
             "phase_results": self.phase_results,
         }
+    
+    def _post_mission_analysis(self, target: str, root_obtained: bool) -> None:
+        """
+        Analyze mission results to improve future performance.
+        
+        This method:
+        1. Summarizes what techniques worked/failed
+        2. Updates technique success rates in MissionMemory
+        3. Stores lessons learned for RAG retrieval
+        """
+        try:
+            self.console.print(Panel(
+                "[cyan]📊 Analyzing mission results for learning...[/]",
+                border_style="cyan",
+            ))
+            
+            # Collect statistics
+            stats = {
+                "target": target,
+                "root_obtained": root_obtained,
+                "phases_run": list(self.phase_results.keys()),
+                "successful_techniques": [],
+                "failed_techniques": [],
+                "services_encountered": [],
+                "vulns_found": 0,
+                "vulns_exploited": 0,
+            }
+            
+            # Analyze enumeration results
+            enum_result = self.phase_results.get("enumeration", {}).get("result", {})
+            if isinstance(enum_result, dict):
+                stats["vulns_found"] = int(enum_result.get("exploitable_vulns", 0) or 0)
+                for v in enum_result.get("vulnerabilities", []):
+                    if isinstance(v, dict):
+                        svc = v.get("service", "unknown")
+                        if svc not in stats["services_encountered"]:
+                            stats["services_encountered"].append(svc)
+            
+            # Analyze exploitation results
+            exploit_result = self.phase_results.get("exploitation", {}).get("result", {})
+            if isinstance(exploit_result, dict):
+                shells = int(exploit_result.get("shells_obtained", 0) or 0)
+                stats["vulns_exploited"] = shells
+                
+                # Extract successful exploits
+                for attempt in exploit_result.get("exploit_attempts", []):
+                    if isinstance(attempt, dict):
+                        if attempt.get("success"):
+                            stats["successful_techniques"].append({
+                                "technique": attempt.get("exploit", "unknown"),
+                                "service": attempt.get("service", "unknown"),
+                                "cve": attempt.get("cve", ""),
+                            })
+                        else:
+                            stats["failed_techniques"].append({
+                                "technique": attempt.get("exploit", "unknown"),
+                                "service": attempt.get("service", "unknown"),
+                                "reason": attempt.get("error", "unknown"),
+                            })
+            
+            # Print learning summary
+            success_rate = (
+                f"{stats['vulns_exploited']}/{stats['vulns_found']} exploitable vulns"
+                if stats['vulns_found'] > 0 else "N/A"
+            )
+            
+            summary_text = (
+                f"[white]Target:[/] {target}\n"
+                f"[white]Root obtained:[/] {'[green]Yes[/]' if root_obtained else '[red]No[/]'}\n"
+                f"[white]Exploit success rate:[/] {success_rate}\n"
+                f"[white]Services encountered:[/] {', '.join(stats['services_encountered'][:5]) or 'none'}\n"
+            )
+            
+            if stats["successful_techniques"]:
+                techs = [t["technique"] for t in stats["successful_techniques"][:3]]
+                summary_text += f"[green]✓ Successful:[/] {', '.join(techs)}\n"
+            
+            if stats["failed_techniques"]:
+                techs = [t["technique"] for t in stats["failed_techniques"][:3]]
+                summary_text += f"[red]✗ Failed:[/] {', '.join(techs)}\n"
+            
+            self.console.print(Panel(
+                summary_text,
+                title="[cyan]MISSION LEARNING SUMMARY[/]",
+                border_style="cyan",
+            ))
+            
+            # Store mission summary for future RAG retrieval
+            try:
+                self.chroma.store_mission_finding(
+                    mission_id=self.memory.mission_id,
+                    agent="OrchestratorAgent",
+                    finding=json.dumps(stats, default=str),
+                    metadata={
+                        "type": "mission_summary",
+                        "target": target,
+                        "root_obtained": root_obtained,
+                        "success_rate": stats["vulns_exploited"] / max(1, stats["vulns_found"]),
+                    },
+                )
+            except Exception as e:
+                self.log_warning(f"Could not store mission summary: {e}")
+            
+            self.memory.log_action(
+                "Orchestrator", "post_mission_analysis",
+                f"root={root_obtained}, exploits={len(stats['successful_techniques'])}"
+            )
+            
+        except Exception as e:
+            self.log_warning(f"Post-mission analysis failed: {e}")

@@ -400,12 +400,14 @@ Impact Assessment:
         return recommendations[:15]  # Top 15 recommendations
 
     def _get_remediation_for_vuln(self, vuln: dict) -> str:
-        """Get specific remediation for a vulnerability."""
+        """Get specific remediation for a vulnerability using LLM with hardcoded fallback."""
         cve = vuln.get("cve", "").lower()
         service = vuln.get("service", "").lower()
         desc = vuln.get("description", "").lower()
         
-        # Known vulnerability remediations
+        # ══════════════════════════════════════════════════════════════════════
+        # FAST PATH: Known vulnerability remediations (instant, no LLM)
+        # ══════════════════════════════════════════════════════════════════════
         if "vsftpd" in service or "2011-2523" in cve:
             return "Upgrade vsftpd to version 3.0.3 or later. The backdoor was present in version 2.3.4."
         
@@ -433,7 +435,19 @@ Impact Assessment:
         if "ftp" in service:
             return "Upgrade FTP server. Consider SFTP instead. Disable anonymous access if not needed."
         
-        # Generic recommendations by severity
+        # ══════════════════════════════════════════════════════════════════════
+        # LLM PATH: Generate remediation for unknown vulnerabilities
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            llm_remediation = self._get_llm_remediation(vuln)
+            if llm_remediation:
+                return llm_remediation
+        except Exception:
+            pass
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # FALLBACK: Generic recommendations by severity
+        # ══════════════════════════════════════════════════════════════════════
         cvss = vuln.get("cvss", 0) or 0
         if cvss >= 9.0:
             return "URGENT: Apply vendor patch immediately. Consider taking system offline until patched."
@@ -441,6 +455,44 @@ Impact Assessment:
             return "Apply vendor security patches. Review access controls and network segmentation."
         else:
             return "Apply vendor updates. Follow security hardening guidelines for this service."
+    
+    def _get_llm_remediation(self, vuln: dict) -> str | None:
+        """Use LLM to generate remediation for unknown vulnerabilities."""
+        cve = vuln.get("cve", "")
+        service = vuln.get("service", "")
+        desc = vuln.get("description", "")[:200]
+        cvss = vuln.get("cvss", 0)
+        
+        if not cve and not service:
+            return None
+        
+        prompt = f"""Generate a SPECIFIC remediation recommendation for this vulnerability.
+
+CVE: {cve or 'Unknown'}
+Service: {service or 'Unknown'}
+CVSS Score: {cvss}
+Description: {desc or 'Not available'}
+
+Requirements:
+1. Be SPECIFIC - mention exact version numbers, patches, or configurations
+2. Keep it under 100 words
+3. Prioritize actions by impact
+4. Include both immediate and long-term fixes
+
+Return ONLY the remediation text, no JSON or formatting."""
+
+        try:
+            raw = self._llm_with_timeout(prompt, timeout=30)
+            if raw and len(raw) > 20:
+                # Clean up LLM response
+                clean = raw.strip()
+                if clean.startswith('"') and clean.endswith('"'):
+                    clean = clean[1:-1]
+                return clean[:500]  # Cap at 500 chars
+        except Exception:
+            pass
+        
+        return None
 
     def _generate_attack_narrative(self, attack_summary: str) -> str:
         """Generate attack narrative from attack chain."""

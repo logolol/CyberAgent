@@ -209,6 +209,152 @@ def get_ollama_client():
     return ollama.Client(host=cfg["ollama_base_url"])
 
 
+def stream_llm_response(
+    prompt: str,
+    role: Literal["default", "reasoning"] = "default",
+    callback: callable = None,
+    timeout: int = 300,
+) -> str:
+    """
+    Stream LLM response with real-time output.
+    
+    This shows tokens as they're generated, providing visual feedback
+    during long reasoning chains. Much better UX than waiting 2+ minutes
+    with no output.
+    
+    Args:
+        prompt: The prompt to send to the LLM
+        role: "default" (pentest model) or "reasoning" (orchestrator model)
+        callback: Optional function(chunk: str) called for each token
+        timeout: Maximum time to wait for complete response
+    
+    Returns:
+        Complete response as string
+    
+    Example:
+        >>> response = stream_llm_response(
+        ...     "Analyze this CVE",
+        ...     role="reasoning",
+        ...     callback=lambda c: print(c, end="", flush=True)
+        ... )
+    """
+    import ollama
+    import time
+    from rich.console import Console
+    from rich.live import Live
+    from rich.text import Text
+    
+    cfg = _load_config()
+    base_url = cfg["ollama_base_url"]
+    role_cfg = cfg["models"].get(role, cfg["models"]["default"])
+    
+    model = role_cfg["name"]
+    temperature = role_cfg.get("temperature", 0.1)
+    num_ctx = role_cfg.get("num_ctx", 8192)
+    
+    console = Console()
+    full_response = []
+    start_time = time.time()
+    
+    try:
+        client = ollama.Client(host=base_url)
+        
+        # Stream the response
+        stream = client.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+            },
+            stream=True,
+        )
+        
+        for chunk in stream:
+            # Check timeout
+            if time.time() - start_time > timeout:
+                break
+            
+            content = chunk.get("message", {}).get("content", "")
+            if content:
+                full_response.append(content)
+                
+                # Call user callback if provided
+                if callback:
+                    try:
+                        callback(content)
+                    except Exception:
+                        pass
+        
+        return "".join(full_response)
+        
+    except Exception as e:
+        console.print(f"[red]Streaming error: {e}[/]")
+        return "".join(full_response) if full_response else ""
+
+
+def stream_with_spinner(
+    prompt: str,
+    role: Literal["default", "reasoning"] = "default",
+    message: str = "Thinking...",
+    timeout: int = 300,
+) -> str:
+    """
+    Stream LLM response with a Rich spinner showing progress.
+    
+    This is the recommended way to call LLM for long operations.
+    Shows a spinner with token count while waiting.
+    
+    Args:
+        prompt: The prompt to send to the LLM
+        role: "default" or "reasoning"
+        message: Status message to show during streaming
+        timeout: Maximum time to wait
+    
+    Returns:
+        Complete response as string
+    """
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    import time
+    
+    console = Console()
+    token_count = [0]  # Use list for closure
+    
+    def count_callback(chunk: str):
+        token_count[0] += 1
+    
+    # Run streaming with progress indicator
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"[cyan]{message}[/] {{task.description}}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("", total=None)
+        
+        response = []
+        start_time = time.time()
+        
+        def update_callback(chunk: str):
+            response.append(chunk)
+            token_count[0] += 1
+            elapsed = time.time() - start_time
+            progress.update(
+                task,
+                description=f"[dim]{token_count[0]} tokens, {elapsed:.0f}s[/]"
+            )
+        
+        result = stream_llm_response(
+            prompt=prompt,
+            role=role,
+            callback=update_callback,
+            timeout=timeout,
+        )
+    
+    return result
+
+
 def ping_all_models() -> dict:
     """Ping every configured model and return status dict."""
     cfg = _load_config()

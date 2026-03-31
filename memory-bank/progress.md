@@ -32,22 +32,67 @@ This lets EnumAgent "remember" what ReconAgent found
 even across separate Python processes.
 Implements true persistent agent memory.
 
-## ✅ Completed — Day 10 (AGI Transformation - Phase 1)
+## ✅ Completed — Day 11 (AGI Transformation - Phase 2)
 
-Sprint: S10
+Sprint: S11
 Commits: pending
 
-### FirewallDetectionAgent (NEW)
-- [x] `src/agents/firewall_agent.py` — 900+ lines, new agent for firewall/IDS/IPS detection
-- [x] 7 detection techniques: TTL analysis, TCP timestamp, RST patterns, rate limiting, port filtering, ICMP analysis, WAF detection
-- [x] 5 evasion profiles: none → light → medium → heavy → paranoid
-- [x] Evasion config injected into MissionMemory for other agents to use
-- [x] `get_evasion_nmap_flags()` helper for ReconAgent/EnumVulnAgent integration
-- [x] wafw00f/nmap WAF detection integration
-- [x] Agent prompt added to `src/prompts/agent_prompts.py`
+### Nmap Evasion Integration
+- [x] `recon_agent.py` — `_apply_nmap_evasion()` reads FirewallDetectionAgent config from MissionMemory
+- [x] `enum_vuln_agent.py` — `_nmap_args_with_evasion()` applies evasion to nmap scans
+- [x] Evasion profiles: none → light (-T3) → medium (-T2, -f) → heavy (-T1, -f -f, proxy) → paranoid (-T0, TOR)
+- [x] All agents now adapt scanning behavior based on detected firewalls
 
-### Dynamic Exploit Discovery
-- [x] `exploitation_agent.py` — `_msfconsole_search_cve()` for direct Metasploit CVE search
+### Dynamic MSF Module Discovery
+- [x] `exploitation_agent.py` — `_msfconsole_search_service()` for service-based MSF module lookup
+- [x] LLM prompt now includes dynamic MSF search results (not just hardcoded hints)
+- [x] Step 1: Try CVE search → Step 2: Fallback to service search → Step 3: Hardcoded MSF_MODULES
+
+### Timing Randomization
+- [x] `base_agent.py` — `randomize_timing(base, jitter_pct=0.2)` utility
+- [x] All tool timeouts now have ±20% jitter to evade fingerprinting
+- [x] Reduces pattern detection by IDS/IPS systems
+
+### Streaming LLM Responses
+- [x] `llm_factory.py` — `stream_llm_response()` for real-time token output
+- [x] `llm_factory.py` — `stream_with_spinner()` for Rich progress display during long LLM calls
+- [x] Better UX: shows token count and elapsed time instead of blank waiting
+
+### Exploit Learning System
+- [x] `exploitation_agent.py` — Records technique failures via `record_technique_failure()`
+- [x] `exploitation_agent.py` — LLM prompt includes "AVOID THESE" list of previously failed techniques
+- [x] Learning persists in MissionMemory.technique_stats for cross-mission improvement
+
+### Improved ReAct Parser
+- [x] `base_agent.py` — Enhanced `_parse_react_response()` with 10+ pattern variants
+- [x] Handles DeepSeek-R1 `<think>` blocks and markdown code blocks
+- [x] `_safe_json_parse()` with single-quote fix and nested extraction
+- [x] `_validate_final_answer()` semantic validation for expected keys
+- [x] `_validate_action()` ensures action is a known tool
+
+### Post-Mission Learning
+- [x] `orchestrator_agent.py` — `_post_mission_analysis()` runs after mission completes
+- [x] Summarizes successful/failed techniques, services encountered, exploit success rate
+- [x] Stores mission summary in ChromaDB for future RAG retrieval
+- [x] Learning panel displayed at end of mission
+
+### LLM-Based Remediations
+- [x] `reporting_agent.py` — `_get_llm_remediation()` for unknown vulnerabilities
+- [x] Fast path: hardcoded remediations for common CVEs (instant)
+- [x] LLM path: generates specific remediation for new vulnerabilities (30s timeout)
+- [x] Fallback: generic severity-based recommendations
+
+### MissionMemory Evasion API
+- [x] `mission_memory.py` — `set_evasion_config(profile, config, detected_firewalls)`
+- [x] `mission_memory.py` — `get_evasion_config()` for agents to retrieve evasion settings
+- [x] Orchestrator sets evasion config from FirewallDetectionAgent results
+
+### Orchestrator Firewall Integration
+- [x] `orchestrator_agent.py` — `_run_firewall_detection()` runs before recon phase
+- [x] Detects firewalls/IDS, sets evasion profile in MissionMemory
+- [x] All subsequent phases automatically use stealth techniques
+
+## ✅ Completed — Day 10 (AGI Transformation - Phase 1)
 - [x] Searchsploit → MSF module extraction improved
 - [x] Any CVE in ExploitDB (50K+) now auto-generates MSF command
 - [x] Dynamic LHOST detection via `ip route get` (no hardcoding)

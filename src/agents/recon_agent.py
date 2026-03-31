@@ -35,7 +35,7 @@ _SRC = Path(__file__).parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, randomize_timing
 from memory.mission_memory import MissionMemory
 
 
@@ -628,6 +628,17 @@ class ReconAgent(BaseAgent):
         args = self._render_args(spec.get("args", []))
         timeout = self.TOOL_TIMEOUTS.get(tool_name, self.DEFAULT_TOOL_TIMEOUT)
         
+        # ══════════════════════════════════════════════════════════════════════
+        # APPLY EVASION PROFILE FROM MISSION MEMORY (if FirewallDetectionAgent ran)
+        # ══════════════════════════════════════════════════════════════════════
+        if binary == "nmap":
+            args = self._apply_nmap_evasion(args, tool_name, spec)
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # TIMING RANDOMIZATION: Add ±20% jitter to avoid fingerprinting
+        # ══════════════════════════════════════════════════════════════════════
+        timeout = randomize_timing(timeout, jitter_pct=0.2)
+        
         # VERBOSE: Log tool call before execution
         self._verbose_tool_call(binary, args)
         
@@ -656,6 +667,87 @@ class ReconAgent(BaseAgent):
         
         self.memory.log_action(self.agent_name, tool_name, output[:200])
         return output
+    
+    def _apply_nmap_evasion(self, args: list[str], tool_name: str, spec: dict) -> list[str]:
+        """
+        Apply evasion profile to nmap commands based on FirewallDetectionAgent results.
+        
+        Priority:
+        1. Evasion config from MissionMemory (FirewallDetectionAgent)
+        2. Tool-specific evasion variants from spec
+        3. Instance evasion_profile setting
+        4. Default (no evasion)
+        """
+        # Check for evasion config from FirewallDetectionAgent
+        try:
+            evasion_state = self.memory._state.get("evasion", {})
+            if evasion_state:
+                profile = evasion_state.get("profile", "none")
+                config = evasion_state.get("config", {})
+                
+                if profile != "none" and config:
+                    self.log_info(f"[EVASION] Applying '{profile}' profile to {tool_name}")
+                    
+                    # Get evasion flags from FirewallDetectionAgent
+                    new_args = []
+                    timing_added = False
+                    
+                    for arg in args:
+                        # Replace default timing with evasion timing
+                        if arg.startswith("-T") and config.get("nmap_timing"):
+                            new_args.append(config["nmap_timing"])
+                            timing_added = True
+                        else:
+                            new_args.append(arg)
+                    
+                    # Add additional evasion flags
+                    extra_flags = config.get("nmap_flags", [])
+                    for flag in extra_flags:
+                        if flag not in new_args:
+                            new_args.append(flag)
+                    
+                    return new_args
+        except Exception as e:
+            self.log_warning(f"[EVASION] Could not apply from MissionMemory: {e}")
+        
+        # Fallback: Check for tool-specific evasion variants
+        evasion_variants = spec.get("evasion_variants", {})
+        if self.evasion_profile != "none" and evasion_variants:
+            # Map evasion profile to variant
+            variant_map = {
+                "light": "stealth",
+                "medium": "stealth",
+                "heavy": "decoy",
+                "paranoid": "fragment",
+            }
+            variant = variant_map.get(self.evasion_profile)
+            if variant and variant in evasion_variants:
+                self.log_info(f"[EVASION] Using '{variant}' variant for {tool_name}")
+                # Merge variant flags with target from original args
+                variant_args = list(evasion_variants[variant])
+                # Find and append target
+                for arg in args:
+                    if not arg.startswith("-") and arg not in variant_args:
+                        variant_args.append(arg)
+                return variant_args
+        
+        # Fallback: Apply class-level evasion profile
+        if self.evasion_profile in self.EVASION_PROFILES:
+            profile_config = self.EVASION_PROFILES[self.evasion_profile]
+            timing = profile_config.get("nmap_timing")
+            extra = profile_config.get("nmap_extra", [])
+            
+            if timing or extra:
+                new_args = []
+                for arg in args:
+                    if arg.startswith("-T") and timing:
+                        new_args.append(timing)
+                    else:
+                        new_args.append(arg)
+                new_args.extend(extra)
+                return new_args
+        
+        return args
 
     def _render_args(self, args_template: list[str]) -> list[str]:
         target = self.target

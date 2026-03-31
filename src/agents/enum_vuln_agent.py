@@ -1448,12 +1448,43 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         
         # Known tools: deterministic args, no LLM needed
         # This saves 30s × n_tools per wave
-        DETERMINISTIC_TOOLS = {
-            "nmap": lambda target, port=None: (
-                [target, "-sV", "-sC", "-p", str(port), "-T4"]
+        def _nmap_args_with_evasion(target: str, port: str | None = None) -> list[str]:
+            """Build nmap args with evasion profile from MissionMemory."""
+            base_args = (
+                [target, "-sV", "-sC", "-p", str(port)]
                 if port else
-                [target, "-sV", "-sC", "--top-ports", "1000", "-T4", "--open"]
-            ),
+                [target, "-sV", "-sC", "--top-ports", "1000", "--open"]
+            )
+            
+            # Check for evasion config from FirewallDetectionAgent
+            try:
+                evasion_state = self.memory._state.get("evasion", {})
+                if evasion_state:
+                    profile = evasion_state.get("profile", "none")
+                    config = evasion_state.get("config", {})
+                    
+                    if profile != "none" and config:
+                        self.log_info(f"[EVASION] Applying '{profile}' profile to nmap")
+                        
+                        # Add evasion timing
+                        timing = config.get("nmap_timing", "-T4")
+                        base_args.append(timing)
+                        
+                        # Add extra evasion flags
+                        for flag in config.get("nmap_flags", []):
+                            if flag not in base_args:
+                                base_args.append(flag)
+                        
+                        return base_args
+            except Exception:
+                pass
+            
+            # Default: -T4 timing
+            base_args.append("-T4")
+            return base_args
+        
+        DETERMINISTIC_TOOLS = {
+            "nmap": _nmap_args_with_evasion,
             "enum4linux": lambda target, **_: ["-a", target],
             "smbclient":  lambda target, **_: ["-L", f"//{target}/", "-N"],
             "smbmap":     lambda target, **_: ["-H", target],
@@ -1492,8 +1523,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                     f"{' '.join(str(a) for a in args[:5])}"
                 )
                 return spec  # ← RETURN EARLY, no LLM call
-            except Exception:
-                pass  # fall through to LLM resolution below
+            except Exception as e:
+                self.log_warning(f"Deterministic tool resolution failed for {best_tool}: {e}")
 
         raw = self._llm_with_timeout(arg_prompt, timeout=240)
         args = self._extract_args_from_llm(raw, target)
@@ -2180,8 +2211,8 @@ Return JSON:
                     ]),
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_warning(f"Failed to store enumeration findings in ChromaDB: {e}")
 
         return result
 

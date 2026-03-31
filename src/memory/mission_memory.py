@@ -268,6 +268,33 @@ class MissionMemory:
         self._state["notes"].append(note)
         self.save_state()
 
+    # ── Evasion Configuration (from FirewallDetectionAgent) ────────────
+    def set_evasion_config(
+        self,
+        profile: str,
+        config: dict,
+        detected_firewalls: list[str] | None = None
+    ):
+        """
+        Store evasion profile and configuration from FirewallDetectionAgent.
+        
+        Args:
+            profile: Evasion profile name (none/light/medium/heavy/paranoid)
+            config: Dict with nmap_timing, nmap_flags, use_proxy, etc.
+            detected_firewalls: List of detected firewall types
+        """
+        self._state["evasion"] = {
+            "profile": profile,
+            "config": config,
+            "detected_firewalls": detected_firewalls or [],
+            "timestamp": self._state.get("timestamp", ""),
+        }
+        self.save_state()
+    
+    def get_evasion_config(self) -> dict:
+        """Get current evasion configuration."""
+        return self._state.get("evasion", {"profile": "none", "config": {}})
+
     # ── Attack Graph management ────────────────────────────────
     # Impact weights for prioritization: root=1.0, user=0.7, service=0.4, info=0.1
     _IMPACT_WEIGHTS = {"root": 1.0, "user": 0.7, "service": 0.4, "info": 0.1}

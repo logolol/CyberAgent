@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -44,6 +45,29 @@ _log = logging.getLogger(__name__)
 def is_verbose() -> bool:
     """Check if verbose mode is enabled via CA_VERBOSE env var."""
     return os.environ.get('CA_VERBOSE') == '1'
+
+
+def randomize_timing(base_value: int | float, jitter_pct: float = 0.2) -> int:
+    """
+    Add ±jitter_pct randomization to a base timing value.
+    
+    This helps evade fingerprinting by making scan timing unpredictable.
+    
+    Args:
+        base_value: Base timeout/delay in seconds
+        jitter_pct: Jitter percentage (0.2 = ±20%)
+    
+    Returns:
+        Randomized value as int
+    
+    Example:
+        >>> randomize_timing(60, 0.2)  # Returns 48-72
+    """
+    if base_value <= 0:
+        return int(base_value)
+    jitter = base_value * jitter_pct
+    randomized = base_value + random.uniform(-jitter, jitter)
+    return max(1, int(randomized))  # Never less than 1s
 
 
 class BaseAgent:
@@ -193,6 +217,12 @@ class BaseAgent:
         """
         Parse THOUGHT / ACTION / ACTION_INPUT / FINAL_ANSWER from raw LLM text.
         Returns dict with keys: thought, action, action_input, final_answer.
+        
+        Enhanced parser features:
+        - Handles DeepSeek-R1 <think> blocks
+        - Extracts JSON from various formats (```json, raw, FINAL_ANSWER:)
+        - Validates semantic correctness of extracted data
+        - Falls back gracefully when parsing fails
         """
         result: dict[str, Any] = {
             "thought": "",
@@ -203,54 +233,174 @@ class BaseAgent:
 
         # Strip DeepSeek-R1 <think>...</think> chain-of-thought wrapper
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        
+        # Also handle markdown code blocks that wrap the entire response
+        if raw.startswith("```") and "```" in raw[3:]:
+            # Remove outer code block
+            inner = re.sub(r"^```\w*\s*", "", raw)
+            inner = re.sub(r"\s*```$", "", inner)
+            raw = inner.strip()
 
-        # THOUGHT
-        thought_m = re.search(
-            r"THOUGHT:\s*(.+?)(?=ACTION:|FINAL_ANSWER:|$)", raw,
-            re.DOTALL | re.IGNORECASE,
-        )
-        if thought_m:
-            result["thought"] = thought_m.group(1).strip()
+        # THOUGHT - multiple patterns
+        thought_patterns = [
+            r"THOUGHT:\s*(.+?)(?=ACTION:|FINAL_ANSWER:|$)",
+            r"Thought:\s*(.+?)(?=Action:|Final|$)",
+            r"## Thought\s*(.+?)(?=## Action|## Final|$)",
+        ]
+        for pattern in thought_patterns:
+            thought_m = re.search(pattern, raw, re.DOTALL | re.IGNORECASE)
+            if thought_m:
+                result["thought"] = thought_m.group(1).strip()
+                break
 
         # FINAL_ANSWER (JSON block) — check this first so we short-circuit
-        final_m = re.search(
-            r"FINAL_ANSWER:\s*(\{.+\})", raw, re.DOTALL | re.IGNORECASE
-        )
-        if final_m:
-            try:
-                result["final_answer"] = json.loads(final_m.group(1))
-            except json.JSONDecodeError:
-                result["final_answer"] = {"raw": final_m.group(1).strip()[:500]}
-            return result
+        final_patterns = [
+            r"FINAL_ANSWER:\s*(\{.+\})",
+            r"Final Answer:\s*(\{.+\})",
+            r"## Final Answer\s*(\{.+\})",
+            r"Result:\s*(\{.+\})",
+        ]
+        for pattern in final_patterns:
+            final_m = re.search(pattern, raw, re.DOTALL | re.IGNORECASE)
+            if final_m:
+                json_str = final_m.group(1)
+                parsed_json = self._safe_json_parse(json_str)
+                if parsed_json:
+                    # Semantic validation: check for expected keys
+                    if self._validate_final_answer(parsed_json):
+                        result["final_answer"] = parsed_json
+                        return result
+                    else:
+                        # Keep as raw if validation fails
+                        result["final_answer"] = {"raw": json_str[:500], "validation_failed": True}
+                        return result
 
         # Try bare JSON block as FINAL_ANSWER (LLM sometimes skips the keyword)
-        bare_json = re.search(r"```json\s*(\{.+?\})\s*```", raw, re.DOTALL)
-        if bare_json:
-            try:
-                result["final_answer"] = json.loads(bare_json.group(1))
-                result["thought"] = result["thought"] or "JSON block returned"
-                return result
-            except json.JSONDecodeError:
-                pass
+        bare_json_patterns = [
+            r"```json\s*(\{.+?\})\s*```",
+            r"```\s*(\{.+?\})\s*```",
+        ]
+        for pattern in bare_json_patterns:
+            bare_json = re.search(pattern, raw, re.DOTALL)
+            if bare_json:
+                parsed = self._safe_json_parse(bare_json.group(1))
+                if parsed:
+                    result["final_answer"] = parsed
+                    result["thought"] = result["thought"] or "JSON block returned"
+                    return result
+        
+        # Try to find any JSON object in the response
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw, re.DOTALL)
+        if json_match:
+            parsed = self._safe_json_parse(json_match.group())
+            if parsed and len(parsed) > 0:
+                # Could be a FINAL_ANSWER
+                if self._validate_final_answer(parsed):
+                    result["final_answer"] = parsed
+                    return result
 
-        # ACTION
-        action_m = re.search(
-            r"ACTION:\s*(\S+)", raw, re.IGNORECASE
-        )
-        if action_m:
-            result["action"] = action_m.group(1).strip()
+        # ACTION - multiple patterns
+        action_patterns = [
+            r"ACTION:\s*(\S+)",
+            r"Action:\s*(\S+)",
+            r"## Action\s*(\S+)",
+            r"Tool:\s*(\S+)",
+        ]
+        for pattern in action_patterns:
+            action_m = re.search(pattern, raw, re.IGNORECASE)
+            if action_m:
+                action = action_m.group(1).strip()
+                # Validate action is a known tool
+                if self._validate_action(action):
+                    result["action"] = action
+                    break
 
-        # ACTION_INPUT
-        input_m = re.search(
-            r"ACTION_INPUT:\s*(\{.+?\})", raw, re.DOTALL | re.IGNORECASE
-        )
-        if input_m:
-            try:
-                result["action_input"] = json.loads(input_m.group(1))
-            except json.JSONDecodeError:
-                result["action_input"] = {"raw": input_m.group(1).strip()[:300]}
+        # ACTION_INPUT - multiple patterns
+        input_patterns = [
+            r"ACTION_INPUT:\s*(\{.+?\})",
+            r"Action Input:\s*(\{.+?\})",
+            r"Input:\s*(\{.+?\})",
+            r"Args:\s*(\{.+?\})",
+        ]
+        for pattern in input_patterns:
+            input_m = re.search(pattern, raw, re.DOTALL | re.IGNORECASE)
+            if input_m:
+                parsed = self._safe_json_parse(input_m.group(1))
+                if parsed:
+                    result["action_input"] = parsed
+                    break
+                else:
+                    result["action_input"] = {"raw": input_m.group(1).strip()[:300]}
+                    break
 
         return result
+    
+    def _safe_json_parse(self, text: str) -> dict | None:
+        """Safely parse JSON with multiple fallback strategies."""
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to fix common JSON issues
+        try:
+            # Fix single quotes
+            fixed = text.replace("'", '"')
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract just the JSON part
+        try:
+            match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+        
+        return None
+    
+    def _validate_final_answer(self, data: dict) -> bool:
+        """Validate that a parsed JSON looks like a valid FINAL_ANSWER."""
+        if not isinstance(data, dict):
+            return False
+        
+        # Check for common expected keys in CyberAgent responses
+        expected_keys = {
+            # Recon/Enum results
+            "hosts_found", "ports_found", "services_found", "vulnerabilities",
+            "findings", "result", "status",
+            # Exploitation results
+            "shells_obtained", "success", "exploits_tried",
+            # General
+            "summary", "details", "recommendations",
+        }
+        
+        # If any expected key is present, it's likely valid
+        if any(key in data for key in expected_keys):
+            return True
+        
+        # If it has more than 2 keys, assume it's intentional
+        if len(data) >= 2:
+            return True
+        
+        return False
+    
+    def _validate_action(self, action: str) -> bool:
+        """Validate that an action is a known tool or command."""
+        # Known tools
+        known_tools = {
+            "nmap", "gobuster", "nikto", "hydra", "sqlmap",
+            "msfconsole", "searchsploit", "curl", "wget", "nc",
+            "netcat", "enum4linux", "smbclient", "smbmap",
+            "python3", "python", "bash", "sh",
+            "dig", "whois", "host", "nslookup",
+            "FINISH", "DONE", "COMPLETE", "NONE",
+        }
+        
+        return action.lower() in {t.lower() for t in known_tools}
 
     # ── Command extraction and validation ─────────────────────────────────────
 
