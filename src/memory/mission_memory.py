@@ -4,6 +4,7 @@ Stores scan findings in JSON + ChromaDB for LLM context injection.
 """
 from __future__ import annotations
 import json, logging, os, sys
+import fcntl  # File locking for thread-safety
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,12 +60,40 @@ class MissionMemory:
 
     # ── Persistence ────────────────────────────────────────────────────
     def save_state(self):
-        with open(self.state_file, "w") as f:
-            json.dump(self._state, f, indent=2, default=str)
+        """Thread-safe JSON save with file locking."""
+        lock_file = self.state_file.with_suffix(".lock")
+        try:
+            with open(lock_file, "w") as lf:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+                try:
+                    # Write to temp file first (atomic write pattern)
+                    tmp_file = self.state_file.with_suffix(".tmp")
+                    with open(tmp_file, "w") as f:
+                        json.dump(self._state, f, indent=2, default=str)
+                    # Atomic rename
+                    os.replace(tmp_file, self.state_file)
+                finally:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)  # Release lock
+        except Exception as e:
+            _log.warning(f"save_state failed: {e}, falling back to direct write")
+            with open(self.state_file, "w") as f:
+                json.dump(self._state, f, indent=2, default=str)
 
     def load_state(self):
-        with open(self.state_file) as f:
-            self._state = json.load(f)
+        """Thread-safe JSON load with file locking."""
+        lock_file = self.state_file.with_suffix(".lock")
+        try:
+            with open(lock_file, "w") as lf:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_SH)  # Shared lock (allows concurrent reads)
+                try:
+                    with open(self.state_file) as f:
+                        self._state = json.load(f)
+                finally:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        except Exception as e:
+            _log.warning(f"load_state lock failed: {e}, direct read")
+            with open(self.state_file) as f:
+                self._state = json.load(f)
 
     @property
     def state(self) -> dict:
