@@ -203,7 +203,7 @@ class MissionMemory:
 
     def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = ""):
         valid_types = {
-            "shell", "root_shell", "meterpreter", "webshell",
+            "shell", "root_shell", "meterpreter", "metasploit", "webshell",
             "reverse_shell", "bind_shell", "bindshell",
             "anon_ftp", "ftp_login", "rsh", "rexec", "telnet",
             "rce", "session", "unknown",

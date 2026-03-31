@@ -199,12 +199,39 @@ class PrivEscAgent(BaseAgent):
         self.target = target
         self.shell_info = briefing.get("shell_info", {})
         initial_user = briefing.get("initial_user", "unknown")
-        shell_port_raw = self.shell_info.get("port") or briefing.get("shell_port") or 0
-        shell_port = int(shell_port_raw)
+        
+        # Extract shell port from multiple possible sources
+        # Prioritize: shell dict lport/port > briefing shell_port > fallback 0
+        shells = briefing.get("shells", [])
+        shell_port = 0
+        shell_ip = target
+        
+        if shells and isinstance(shells, list):
+            for shell in shells:
+                if isinstance(shell, dict):
+                    # Try multiple port field names
+                    port_candidate = (
+                        shell.get("lport") or 
+                        shell.get("port") or 
+                        shell.get("shell_port") or
+                        0
+                    )
+                    if port_candidate and int(port_candidate) > 0:
+                        shell_port = int(port_candidate)
+                        shell_ip = shell.get("ip") or shell.get("target_ip") or target
+                        initial_user = shell.get("user") or initial_user
+                        break
+        
+        # Fallback to old briefing fields if no valid shell port found
+        if not shell_port:
+            shell_port_raw = self.shell_info.get("port") or briefing.get("shell_port") or 0
+            shell_port = int(shell_port_raw)
+        
+        self.target = shell_ip  # Update target to actual shell IP
         
         self.console.print(Panel(
             f"[bold magenta]🔓 PrivEscAgent — Intelligent Privilege Escalation[/]\n"
-            f"[white]Target:[/] [magenta]{target}[/]\n"
+            f"[white]Target:[/] [magenta]{shell_ip}[/]\n"
             f"[white]Initial User:[/] {initial_user}\n"
             f"[white]Shell Port:[/] {shell_port}\n"
             f"[white]Strategy:[/] Sudo → SUID → Caps → Cron → Kernel CVEs",

@@ -1435,11 +1435,16 @@ Return JSON:
             enum_result = self.phase_results.get("enumeration", {}).get("result", {})
             if isinstance(enum_result, dict):
                 stats["vulns_found"] = int(enum_result.get("exploitable_vulns", 0) or 0)
-                for v in enum_result.get("vulnerabilities", []):
-                    if isinstance(v, dict):
-                        svc = v.get("service", "unknown")
-                        if svc not in stats["services_encountered"]:
-                            stats["services_encountered"].append(svc)
+                try:
+                    vulns = enum_result.get("vulnerabilities", [])
+                    if isinstance(vulns, list):
+                        for v in vulns:
+                            if isinstance(v, dict):
+                                svc = v.get("service", "unknown")
+                                if svc not in stats["services_encountered"]:
+                                    stats["services_encountered"].append(svc)
+                except (TypeError, AttributeError) as e:
+                    self.log_warning(f"Could not iterate vulnerabilities: {e}")
             
             # Analyze exploitation results
             exploit_result = self.phase_results.get("exploitation", {}).get("result", {})
@@ -1448,20 +1453,25 @@ Return JSON:
                 stats["vulns_exploited"] = shells
                 
                 # Extract successful exploits
-                for attempt in exploit_result.get("exploit_attempts", []):
-                    if isinstance(attempt, dict):
-                        if attempt.get("success"):
-                            stats["successful_techniques"].append({
-                                "technique": attempt.get("exploit", "unknown"),
-                                "service": attempt.get("service", "unknown"),
-                                "cve": attempt.get("cve", ""),
-                            })
-                        else:
-                            stats["failed_techniques"].append({
-                                "technique": attempt.get("exploit", "unknown"),
-                                "service": attempt.get("service", "unknown"),
-                                "reason": attempt.get("error", "unknown"),
-                            })
+                try:
+                    attempts = exploit_result.get("exploit_attempts", [])
+                    if isinstance(attempts, list):
+                        for attempt in attempts:
+                            if isinstance(attempt, dict):
+                                if attempt.get("success"):
+                                    stats["successful_techniques"].append({
+                                        "technique": attempt.get("exploit", "unknown"),
+                                        "service": attempt.get("service", "unknown"),
+                                        "cve": attempt.get("cve", ""),
+                                    })
+                                else:
+                                    stats["failed_techniques"].append({
+                                        "technique": attempt.get("exploit", "unknown"),
+                                        "service": attempt.get("service", "unknown"),
+                                        "reason": attempt.get("error", "unknown"),
+                                    })
+                except (TypeError, AttributeError) as e:
+                    self.log_warning(f"Could not iterate exploit_attempts: {e}")
             
             # Print learning summary
             success_rate = (
