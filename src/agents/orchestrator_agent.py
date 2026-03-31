@@ -255,23 +255,57 @@ class OrchestratorAgent(BaseAgent):
                 if t and t not in self.mission_intelligence["mitre_chain"]:
                     self.mission_intelligence["mitre_chain"].append(t)
 
-        # Accumulate shells (from exploitation) — deduplicate by (type, user, path)
+        # Accumulate shells (from exploitation) — deduplicate by content
+        # ExploitationAgent returns shells at the TOP-LEVEL 'shells' key (list of dicts)
+        # AND may also have them inside result['shells'] — check both.
         if phase == "exploitation":
-            shells = result.get("shells_obtained", [])
-            if isinstance(shells, list):
-                existing = self.mission_intelligence["shells_obtained"]
-                for s in shells:
-                    if s and s not in existing:
-                        existing.append(s)
+            # Top-level shells list (primary source)
+            shells_top = phase_result.get("shells", [])
+            # Inner result shells list (secondary source)
+            shells_inner = result.get("shells", [])
+            # Combine both sources for robustness
+            all_shells = []
+            for s in (shells_top if isinstance(shells_top, list) else []) + \
+                      (shells_inner if isinstance(shells_inner, list) else []):
+                if s and isinstance(s, dict) and s not in all_shells:
+                    all_shells.append(s)
+            
+            existing = self.mission_intelligence["shells_obtained"]
+            for s in all_shells:
+                if s and s not in existing:
+                    existing.append(s)
+                    # Also ensure the shell is written to MissionMemory hosts
+                    # so the phase gate (which reads memory.hosts) can see it
+                    try:
+                        host_ip = s.get("ip") or self.memory.target
+                        self.memory.add_shell(
+                            ip=host_ip,
+                            shell_type=s.get("type", "shell"),
+                            user=s.get("user", "unknown"),
+                        )
+                    except Exception as _e:
+                        self.log_warning(f"Re-sync shell to memory failed: {_e}")
+            
+            if all_shells:
+                self.log_info(
+                    f"Intelligence: {len(all_shells)} shell(s) accumulated from exploitation"
+                )
 
         # Accumulate credentials and loot (from post-exploit) — deduplicate
         if phase in ["exploitation", "postexploit"]:
-            creds = result.get("credentials_found", [])
-            if isinstance(creds, list):
-                existing_creds = self.mission_intelligence["credentials_found"]
-                for c in creds:
-                    if c and c not in existing_creds:
-                        existing_creds.append(c)
+            # Top-level credentials list
+            creds_top = phase_result.get("credentials", [])
+            # Inner result credentials
+            creds_inner = result.get("credentials_found", [])
+            all_creds = []
+            for c in (creds_top if isinstance(creds_top, list) else []) + \
+                      (creds_inner if isinstance(creds_inner, list) else []):
+                if c and isinstance(c, dict) and c not in all_creds:
+                    all_creds.append(c)
+            existing_creds = self.mission_intelligence["credentials_found"]
+            for c in all_creds:
+                if c and c not in existing_creds:
+                    existing_creds.append(c)
             loot = result.get("loot", [])
             if isinstance(loot, list):
                 existing_loot = self.mission_intelligence["loot"]
