@@ -56,22 +56,27 @@ def check_and_update_rag():
     import subprocess
     
     update_marker = Path(__file__).parent / "memory" / ".last_rag_update"
-    chromadb_path = Path(__file__).parent / "memory" / "chromadb"
+    chromadb_path = Path(__file__).parent / "knowledge_base" / "chroma_db"
     
-    # SKIP if ChromaDB already exists AND marker is fresh
-    if chromadb_path.exists() and update_marker.exists():
-        age = time.time() - update_marker.stat().st_mtime
-        if age < 86400:  # 24 hours
-            console.print("[dim]✓ RAG databases up-to-date (checked <24h ago)[/]")
+    # If ChromaDB exists, we're good - just manage the marker
+    if chromadb_path.exists():
+        if update_marker.exists():
+            age = time.time() - update_marker.stat().st_mtime
+            if age < 86400:  # 24 hours
+                console.print("[dim]✓ RAG databases up-to-date (checked <24h ago)[/]")
+                return
+            else:
+                # Marker stale but DB exists - refresh marker
+                console.print("[dim]✓ RAG databases present, refreshing marker[/]")
+                update_marker.touch()
+                return
+        else:
+            # No marker but DB exists - create marker
+            console.print("[dim]✓ RAG databases detected, skipping initial sync[/]")
+            update_marker.touch()
             return
     
-    # SKIP if ChromaDB exists but no marker (first-time after build)
-    if chromadb_path.exists() and not update_marker.exists():
-        console.print("[dim]✓ RAG databases detected, skipping initial sync[/]")
-        update_marker.touch()  # Create marker to prevent future checks for 24h
-        return
-    
-    # Only update if ChromaDB missing (fresh install)
+    # Only fail if ChromaDB is actually missing
     console.print("\n[bold yellow]⚠️  ChromaDB not found — RAG databases need initialization[/]")
     console.print("[dim]This is a one-time setup. Run manually:[/]")
     console.print("[bold cyan]  bash update_rag.sh[/]\n")

@@ -740,7 +740,7 @@ class OrchestratorAgent(BaseAgent):
             from agents.firewall_agent import FirewallDetectionAgent
             
             firewall_agent = FirewallDetectionAgent(mission_memory=self.memory)
-            result = firewall_agent.run(target=target, quick_scan=True)
+            result = firewall_agent.run(target=target, briefing={"quick_scan": True})
             
             if result.get("success"):
                 profile = result.get("result", {}).get("recommended_profile", "none")
