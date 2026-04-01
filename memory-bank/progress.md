@@ -1,5 +1,38 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 13 (Service-Aware Credential Execution)
+
+Sprint: S13
+Commits: `18f471a`, `11d1117`
+
+### Bug: SSH Legacy Key Negotiation
+- **Root cause**: OpenSSH 10+ rejects old key types (ssh-rsa, ssh-dss) by default
+- [x] `privesc_agent.py` — Fixed SSH options: `HostkeyAlgorithms=+ssh-rsa`, `PubkeyAcceptedAlgorithms=+ssh-rsa`
+- [x] `postexploit_agent.py` — Same SSH legacy key fix
+
+### Bug: Single SSH Fallback Not Generic
+- **Root cause**: PrivEsc/PostExploit only tried SSH, but creds may be for other services
+- [x] `privesc_agent.py` — `_exec_via_creds()` routes by service type
+- [x] `privesc_agent.py` — `_exec_via_telnet()` for legacy systems
+- [x] `privesc_agent.py` — `_exec_via_psexec()`, `_exec_via_smbexec()` for SMB creds
+- [x] `privesc_agent.py` — `_exec_via_psql()` for PostgreSQL creds
+- [x] `postexploit_agent.py` — Same service-aware credential execution
+
+### Bug: RAG Path Check Wrong
+- [x] `main.py` — Fixed `chromadb_path` to `knowledge_base/chroma_db` (was `memory/chromadb`)
+- [x] `main.py` — Fixed marker staleness logic to refresh marker when DB exists
+
+### Bug: FirewallDetectionAgent Signature
+- [x] `orchestrator_agent.py` — Pass `quick_scan` via `briefing` dict, not keyword arg
+
+### Service-to-Credential Mapping
+- ssh/telnet → Try telnet first (more reliable on old systems), then ssh_legacy
+- smb/samba → psexec, smbexec via impacket
+- postgres/postgresql → psql with COPY TO PROGRAM
+- fallback → Try all methods
+
+---
+
 ## ✅ Completed — Day 12 (Shell Persistence & SSH Fallback)
 
 Sprint: S12
