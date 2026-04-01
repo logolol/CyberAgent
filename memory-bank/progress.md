@@ -1,5 +1,41 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 12 (Shell Persistence & SSH Fallback)
+
+Sprint: S12
+Commits: `ad43592`, `2fa59d3`
+
+### Bug: Shell Port Not Stored
+- [x] `mission_memory.py` — `add_shell()` now accepts `port` and `lport` parameters
+- [x] `exploitation_agent.py` — `_write_shell_to_memory()` passes port info
+- [x] `orchestrator_agent.py` — Shell sync passes port/lport fields
+
+### Bug: PrivEsc/PostExploit Failed (Connection Refused)
+- **Root cause**: Reverse shells are ephemeral. Target connects to US on LPORT.
+  When ExploitationAgent stops the listener, the shell dies. PrivEsc/PostExploit
+  then fail trying to "connect" to target:port (bind shell behavior).
+  
+- [x] `privesc_agent.py` — `_load_credentials_from_memory()` loads SSH creds at start
+- [x] `privesc_agent.py` — `_exec_via_ssh()` executes commands via sshpass
+- [x] `privesc_agent.py` — `_exec_shell_cmd_fallback()` tries SSH when socket fails
+- [x] `postexploit_agent.py` — Same SSH fallback infrastructure
+- [x] Installed `sshpass` package for non-interactive SSH auth
+
+### Bug: MSF False Positives (FIXED EARLIER)
+- [x] `exploitation_agent.py` — `_try_msf_x_exploit()` uses strict regex `r"session \d+ opened"`
+- [x] Rejects false positives like "[*] No payload configured" and "No session bandwidth limit"
+- Result: 1-2 shells (vs 8 fake shells before)
+
+### Test Results (Metasploitable 2)
+- 1 shell obtained (legitimate)
+- 5 credentials found (user:user, postgres:postgres)
+- 39 vulnerabilities (4 exploitable)
+- PrivEsc: Now tries SSH fallback (sshpass required)
+- PostExploit: Now tries SSH fallback
+- PDF Report: Generated successfully
+
+---
+
 ## Planned Intelligence Improvements (pre-EnumerationAgent)
 
 ### 1. Confidence scoring on recon findings
