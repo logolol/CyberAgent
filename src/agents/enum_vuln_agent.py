@@ -232,12 +232,13 @@ class EnumVulnAgent(BaseAgent):
         self.iteration = 0
         self.done = False
         self._completed_tools = set()
+        self._llm_failures = 0  # Track consecutive LLM failures
 
         self.console.print(Panel(
             f"[bold cyan]🔎 EnumVulnAgent — Active Enum + Vuln Detection[/]\n"
             f"[white]Target:[/] [cyan]{target}[/]\n"
             f"[white]Model:[/] Qwen2.5:7b | [white]RAG:[/] 147K docs\n"
-            f"[white]Concurrency:[/] {self.MAX_CONCURRENT} parallel tools",
+            f"[white]Strategy:[/] ReAct Loop → Deterministic Fallback",
             border_style="cyan",
         ))
 
@@ -250,11 +251,70 @@ class EnumVulnAgent(BaseAgent):
                 f"{len(self.recon_findings.get('osint_context', []))} mission context item(s)"
             )
 
-            # Stage 2: gather raw evidence through deterministic tool waves
-            self._run_gather_phase()
+            # ══════════════════════════════════════════════════════════════
+            # ReAct LOOP: LLM-driven enumeration
+            # ══════════════════════════════════════════════════════════════
+            react_context = {
+                "phase": "enumeration",
+                "target": target,
+                "hosts": self.attack_surface,
+                "findings": [],
+                "observations": [],
+            }
+            
+            self.log_info("Starting ReAct enumeration loop...")
+            
+            for iteration in range(self.max_iterations):
+                if self._llm_failures >= 3:
+                    self.log_warning("3 LLM failures, switching to deterministic mode")
+                    break
+                
+                if self.vulnerabilities and len(self.vulnerabilities) >= 5:
+                    self.log_success("Sufficient vulns found, ending ReAct loop")
+                    break
+                
+                task = self._build_enum_task(react_context)
+                
+                try:
+                    react_result = self.react(task=task, context=react_context)
+                    
+                    if react_result.get("success"):
+                        result = react_result.get("result", {})
+                        
+                        # Extract findings from result
+                        if isinstance(result, dict):
+                            if result.get("vulnerabilities"):
+                                self.vulnerabilities.extend(result["vulnerabilities"])
+                            if result.get("ports"):
+                                react_context["findings"].extend(result["ports"])
+                        
+                        react_context["observations"].append(result)
+                        self._llm_failures = 0
+                    else:
+                        self._llm_failures += 1
+                        self.log_warning(f"ReAct iteration {iteration} failed: {react_result.get('error')}")
+                        
+                except Exception as e:
+                    self._llm_failures += 1
+                    self.log_warning(f"ReAct iteration {iteration} exception: {e}")
 
-            # Stage 3: single analysis pass over all outputs
-            analysis = self._run_analysis_phase()
+            # ══════════════════════════════════════════════════════════════
+            # DETERMINISTIC FALLBACK: No LLM required
+            # ══════════════════════════════════════════════════════════════
+            if not self.vulnerabilities or self._llm_failures >= 3:
+                self.log_info("Fallback: Running deterministic enumeration...")
+                
+                # Stage 2: gather raw evidence through deterministic tool waves
+                self._run_gather_phase()
+
+                # Stage 3: single analysis pass over all outputs
+                analysis = self._run_analysis_phase()
+            else:
+                # Use ReAct findings for analysis
+                analysis = {
+                    "vulnerabilities": self.vulnerabilities,
+                    "ports": react_context.get("findings", []),
+                }
 
             # Stage 4: compile + store final findings
             findings = self._compile_vuln_report(analysis)
@@ -283,6 +343,26 @@ class EnumVulnAgent(BaseAgent):
                 },
                 "raw_outputs": self.all_results,
             }
+    
+    def _build_enum_task(self, context: dict) -> str:
+        """Build a concise task description for ReAct enumeration loop."""
+        hosts = context.get("hosts", {})
+        host_summary = ", ".join(list(hosts.keys())[:5])
+        
+        return f"""Enumerate services and find vulnerabilities on {context['target']}.
+
+KNOWN HOSTS: {host_summary or context['target']}
+
+AVAILABLE ACTIONS:
+- nmap: Port scan with service detection
+- nuclei: Vulnerability scanner
+- nikto: Web vulnerability scanner
+- enum4linux: SMB/Windows enumeration
+- gobuster: Directory brute-forcing
+
+GOAL: Find open ports, identify services, detect vulnerabilities.
+For each vulnerability, determine if it's exploitable.
+When you have enough findings, return FINAL_ANSWER with vulnerabilities list."""
 
     # ── Stage 1: mission briefing ─────────────────────────────────────────────
 

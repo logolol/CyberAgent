@@ -528,6 +528,7 @@ class BaseAgent:
     def _execute_action(self, action: str, action_input: dict) -> Any:
         """
         Dispatch a parsed ACTION to the correct handler.
+        Uses use_intelligent by default, falls back to direct use.
         Never raises — always returns a dict.
         """
         action = action.strip().lower()
@@ -548,15 +549,38 @@ class BaseAgent:
             except Exception as e:
                 return {"stored": False, "error": str(e)}
 
-        # Default: try DynamicToolManager
+        # ══════════════════════════════════════════════════════════════════════
+        # INTELLIGENT TOOL EXECUTION: LLM generates args, with fallback
+        # ══════════════════════════════════════════════════════════════════════
         tool_args = action_input.get("args", [])
         if not isinstance(tool_args, list):
             tool_args = [str(tool_args)]
         purpose = action_input.get("purpose", f"{self.agent_name} task")
+        context = action_input.get("context", {})
+        
         try:
-            return self.tools.use(action, args=tool_args, purpose=purpose)
+            # Try intelligent generation first (LLM decides args)
+            result = self.tools.use_intelligent(
+                tool_name=action,
+                purpose=purpose,
+                context=context,
+                timeout=120,
+            )
+            
+            # Check if intelligent execution failed
+            if result.get("error") or result.get("returncode", 0) != 0:
+                self.log_warning(f"use_intelligent({action}) failed, trying direct...")
+                # Fallback to direct use with provided args
+                result = self.tools.use(action, args=tool_args, purpose=purpose)
+            
+            return result
+            
         except Exception as e:
-            return {"error": str(e), "tool": action}
+            # Final fallback: direct use
+            try:
+                return self.tools.use(action, args=tool_args, purpose=purpose)
+            except Exception as e2:
+                return {"error": str(e2), "tool": action, "fallback_error": str(e)}
 
     # ── Core ReAct loop ───────────────────────────────────────────────────────
 
@@ -1107,29 +1131,67 @@ class BaseAgent:
                     concurrent.futures.thread._threads_queues[t] = \
                         self._work_queue
 
-        ex = _DaemonExecutor(max_workers=1)
-        future = ex.submit(self.llm.invoke, prompt)
-        try:
-            response = future.result(timeout=timeout)
-            result = (response.content
-                    if hasattr(response, "content")
-                    else str(response))
-            # VERBOSE: Log response after LLM call
-            self._verbose_llm_response(result)
+        def _invoke(p, to):
+            ex = _DaemonExecutor(max_workers=1)
+            future = ex.submit(self.llm.invoke, p)
+            try:
+                response = future.result(timeout=to)
+                result = (response.content
+                        if hasattr(response, "content")
+                        else str(response))
+                return result
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                return None  # None signals timeout
+            except Exception as e:
+                self.log_warning(f"LLM call failed: {e}")
+                return ""
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+
+        # First attempt with full prompt
+        result = _invoke(prompt, timeout)
+        
+        if result is not None:
+            if result:
+                self._verbose_llm_response(result)
             return result
-        except concurrent.futures.TimeoutError:
-            self.log_warning(
-                f"LLM decision timed out after {timeout}s"
-            )
-            # VERBOSE: Log timeout
-            self._verbose_llm_timeout(timeout)
-            future.cancel()
-            return ""
-        except Exception as e:
-            self.log_warning(f"LLM call failed: {e}")
-            return ""
-        finally:
-            ex.shutdown(wait=False, cancel_futures=True)
+        
+        self.log_warning(f"LLM timed out after {timeout}s")
+        self._verbose_llm_timeout(timeout)
+        
+        # Retry with shorter prompt if prompt is large
+        if len(prompt) > 2000:
+            self.log_info("Retrying with shortened prompt...")
+            
+            # Create shorter prompt: keep system instruction, remove RAG context
+            lines = prompt.split("\n")
+            short_lines = []
+            in_rag = False
+            for line in lines:
+                if "RAG CONTEXT" in line.upper() or "KNOWLEDGE BASE" in line.upper():
+                    in_rag = True
+                    continue
+                if in_rag and line.startswith("---"):
+                    in_rag = False
+                    continue
+                if not in_rag:
+                    short_lines.append(line)
+            
+            short_prompt = "\n".join(short_lines)[:3000]  # Hard limit
+            
+            # Second attempt with same timeout
+            result = _invoke(short_prompt, timeout)
+            
+            if result is not None:
+                if result:
+                    self._verbose_llm_response(result)
+                return result
+            
+            self.log_warning(f"LLM retry also timed out")
+        
+        # Double timeout - return empty string (callers should check for this)
+        return ""
 
     # ── Public helper methods (inherited by all specialists) ──────────────────
 

@@ -445,6 +445,9 @@ class MissionMemory:
     def get_prioritized_nodes(self) -> list[dict]:
         """
         Return attack nodes sorted by confidence × impact_weight, untried first.
+        
+        If ExperienceMemory is available, adjusts confidence using historical
+        success rates for the CVE/service combination.
         """
         if "attack_graph" not in self._state:
             return []
@@ -457,6 +460,24 @@ class MissionMemory:
             conf = float(n.get("confidence", 0))
             impact = n.get("impact", "info")
             weight = self._IMPACT_WEIGHTS.get(impact, 0.1)
+            
+            # ════════════════════════════════════════════════════════════════
+            # CROSS-MISSION LEARNING: Adjust confidence using historical data
+            # ════════════════════════════════════════════════════════════════
+            if self.experience:
+                try:
+                    cve = n.get("cve", "")
+                    service = n.get("service", "")
+                    
+                    if cve and service:
+                        historical_rate = self.experience.get_success_rate(cve, service)
+                        if historical_rate > 0:
+                            # Blend: 50% original confidence + 50% historical rate
+                            conf = (conf + historical_rate) / 2
+                            _log.debug(f"Adjusted confidence for {cve}: {conf:.2f} (historical: {historical_rate:.2f})")
+                except Exception:
+                    pass  # Don't let experience lookup break prioritization
+            
             return conf * weight
 
         return sorted(nodes, key=priority_score, reverse=True)
