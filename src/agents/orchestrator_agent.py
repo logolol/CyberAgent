@@ -651,11 +651,48 @@ class OrchestratorAgent(BaseAgent):
         # All subsequent phases will adapt their scanning behavior accordingly.
         self._run_firewall_detection(target)
 
+        # ══════════════════════════════════════════════════════════════════════
+        # LLM FAILURE TRACKING: Switch to deterministic mode after 3 failures
+        # ══════════════════════════════════════════════════════════════════════
+        llm_failure_count = 0
+        MAX_LLM_FAILURES = 3
+        use_deterministic = False
+
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
         phases_to_run = self._get_phases_to_run(phase)
 
         for phase_name in phases_to_run:
             self.current_phase = phase_name
+            
+            # Check if we should switch to deterministic mode
+            if llm_failure_count >= MAX_LLM_FAILURES and not use_deterministic:
+                self.log_warning(f"⚠️  {llm_failure_count} LLM failures detected — switching to DeterministicPentest")
+                use_deterministic = True
+                
+                try:
+                    from agents.deterministic_fallback import DeterministicPentest
+                    dp = DeterministicPentest(
+                        mission_memory=self.memory,
+                        chroma_manager=self.chroma,
+                    )
+                    deterministic_result = dp.run(target)
+                    self.memory.log_action("Orchestrator", "deterministic_fallback", 
+                                          f"Switched to deterministic mode after {llm_failure_count} LLM failures")
+                    
+                    # Merge deterministic results into phase_results
+                    self.phase_results["deterministic"] = deterministic_result
+                    
+                    # Skip remaining phases if deterministic mode succeeded
+                    if deterministic_result.get("success"):
+                        self.console.print(Panel(
+                            "[bold green]✅ DeterministicPentest completed successfully[/]\n"
+                            f"Shells: {len(deterministic_result.get('result', {}).get('shells', []))}",
+                            title="[green]DETERMINISTIC MODE[/]",
+                            border_style="green",
+                        ))
+                        break
+                except Exception as e:
+                    self.log_error(f"DeterministicPentest failed: {e}")
 
             self.console.print(Panel(
                 f"[bold cyan]▶  PHASE: {phase_name.upper()}[/]",
@@ -692,10 +729,19 @@ class OrchestratorAgent(BaseAgent):
             try:
                 result = agent.run(target=target, briefing=briefing)
                 self.phase_results[phase_name] = result
+                
+                # Track LLM failures from agent result
+                if result.get("llm_failures", 0) > 0:
+                    llm_failure_count += result.get("llm_failures", 0)
+                    self.log_warning(f"Agent reported {result.get('llm_failures')} LLM failures (total: {llm_failure_count})")
+                    
             except Exception as e:
                 self.log_error(f"Agent '{phase_name}' crashed: {e}")
                 result = {"success": False, "error": str(e)}
                 self.phase_results[phase_name] = result
+                # Count crash as LLM failure (likely timeout)
+                if "timeout" in str(e).lower() or "llm" in str(e).lower():
+                    llm_failure_count += 1
 
             # Accumulate intelligence from this phase before briefing the next
             self._accumulate_phase_intelligence(phase_name, result)

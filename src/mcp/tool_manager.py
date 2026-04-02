@@ -875,9 +875,13 @@ Return ONLY the module path (e.g., exploit/unix/ftp/vsftpd_234_backdoor), nothin
         return ["-q", "-x", msf_cmd]
 
     def use_intelligent(self, tool_name: str, attack_context: dict,
-                        timeout: int = 300) -> dict:
+                        timeout: int = 120) -> dict:
         """
         Primary agent attack method: LLM picks flags, then runs the tool.
+        
+        Returns:
+            dict with keys: stdout, stderr, returncode, command
+            On error: {"error": str, "tool": tool_name}
 
         Usage:
           result = tm.use_intelligent("sqlmap", {
@@ -887,12 +891,21 @@ Return ONLY the module path (e.g., exploit/unix/ftp/vsftpd_234_backdoor), nothin
             "known_info": "MySQL backend, login form"
           })
         """
-        args = self.configure_for_attack(tool_name, attack_context)
-        return self.use(
-            tool_name, args,
-            purpose=attack_context.get("purpose", ""),
-            timeout=timeout,
-        )
+        try:
+            args = self.configure_for_attack(tool_name, attack_context)
+            if not args:
+                return {"error": "configure_for_attack returned empty args", "tool": tool_name}
+            
+            result = self.use(
+                tool_name, args,
+                purpose=attack_context.get("purpose", ""),
+                timeout=timeout,
+            )
+            return result
+            
+        except Exception as e:
+            _log.warning(f"use_intelligent({tool_name}) failed: {e}")
+            return {"error": f"intelligent_failed: {e}", "tool": tool_name}
 
     def get_tools_for_purpose(self, purpose: str) -> list[str]:
         """

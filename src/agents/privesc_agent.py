@@ -161,9 +161,16 @@ class PrivEscAgent(BaseAgent):
         self._ssh_creds: Optional[dict] = None  # {username, password}
         
     def _connect_shell(self, target: str, shell_port: int) -> bool:
-        """Establish a persistent socket connection to the bind shell."""
+        """Establish a persistent socket connection to the bind shell.
+        
+        First checks MissionMemory for existing shell from ExploitationAgent,
+        then falls back to creating a new connection.
+        """
         if not shell_port:
-            return False
+            # Try to find shell port from MissionMemory
+            shell_port = self._get_shell_port_from_memory(target)
+            if not shell_port:
+                return False
             
         import socket
         try:
@@ -180,6 +187,27 @@ class PrivEscAgent(BaseAgent):
             self.log_warning(f"Failed to connect persistent shell: {e}")
             self._shell_socket = None
             return False
+    
+    def _get_shell_port_from_memory(self, target: str) -> int | None:
+        """Look up shell port from MissionMemory (populated by ExploitationAgent)."""
+        try:
+            ctx = self.memory.get_full_context()
+            if isinstance(ctx, str):
+                import json
+                ctx = json.loads(ctx)
+            
+            hosts = ctx.get("hosts", {})
+            host_data = hosts.get(target, {})
+            shells = host_data.get("shells", [])
+            
+            for shell in shells:
+                port = shell.get("port") or shell.get("shell_port")
+                if port:
+                    self.log_info(f"Found shell port {port} from MissionMemory")
+                    return int(port)
+        except Exception as e:
+            self.log_debug(f"Could not get shell port from memory: {e}")
+        return None
             
     def _disconnect_shell(self):
         """Close the persistent shell connection."""
