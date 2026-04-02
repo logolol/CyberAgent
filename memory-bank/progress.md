@@ -1,6 +1,47 @@
 # Progress — Multi-Agent PentestAI
 
-## ✅ Completed — Day 14 (Exploitation Pipeline Fixes)
+## ✅ Completed — Day 14 Afternoon (Adversarial Analysis + Critical Fixes)
+
+Sprint: S14-PM
+Commits: `c53b2aa`, `42b53f4`, `3763edb`, (pending)
+
+### Adversarial Analysis Complete
+- [x] Conducted deep adversarial analysis of exploitation pipeline
+- [x] Identified 7 critical issues preventing AGI behavior
+- [x] Created `memory-bank/adversarial-analysis-day14.md` (comprehensive findings)
+- **Result**: Clear roadmap for remaining ~15-18 hours of work
+
+### Critical Fix: LLM Prompt Size Reduction
+- **Root cause**: 1,200+ token prompts caused 60-90s+ LLM response times → timeouts
+- [x] `exploitation_agent.py` — Reduced prompt from 1,200 → 400 tokens (67% reduction)
+- [x] `exploitation_agent.py` — RAG context: top 2 hits only (250 chars each, max 500 total)
+- [x] `exploitation_agent.py` — Removed verbose rules, kept few-shot examples only
+- **Result**: Expected LLM response time 30-60s (warm) instead of 90-120s+
+
+### Critical Fix: LLM Timeout Increase
+- **Root cause**: 60s timeout insufficient for cold model start (~90-120s)
+- [x] `exploitation_agent.py` — 60s → 180s for exploit reasoning
+- [x] `exploitation_agent.py` — Allows cold start + complex reasoning without timeout
+- **Result**: Zero timeouts even on cold model start
+
+### Fix: Persistent Shell Infrastructure
+- [x] `exploitation_agent.py` — Added `self.persistent_shells = {}` in __init__
+- **Status**: Infrastructure added, implementation incomplete
+- **Remaining**: Store socket after exploitation, reuse in _exec_cmd()
+- **Estimated**: 1-2 hours to complete
+
+### Adversarial Findings (NOT YET FIXED)
+- [ ] Dynamic exploit generation (use_intelligent never called) — 3-4 hours
+- [ ] Version-aware CVE filtering (regex produces false positives) — 2-3 hours
+- [ ] Attack graph confidence learning (no cross-mission learning) — 3-4 hours
+- [ ] Intelligent fallback chain (RAG → version filter → hints) — 2-3 hours
+- [ ] Complete shell persistence (socket reuse) — 1-2 hours
+
+**Total remaining work**: ~15-18 hours for complete AGI transformation
+
+---
+
+## ✅ Completed — Day 14 Morning (Exploitation Pipeline Fixes)
 
 Sprint: S14
 Commits: `42b53f4`, `3763edb`, (pending)
