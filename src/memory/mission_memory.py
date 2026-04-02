@@ -57,6 +57,15 @@ class MissionMemory:
             _log.warning(f"ChromaDB unavailable for MissionMemory: {e}")
             self._chroma = None
             self._col = None
+        
+        # ExperienceMemory (cross-mission learning)
+        try:
+            from memory.experience_memory import ExperienceMemory
+            self.experience = ExperienceMemory()
+            _log.info(f"ExperienceMemory loaded: {self.experience.get_all_stats()}")
+        except Exception as e:
+            _log.warning(f"ExperienceMemory unavailable: {e}")
+            self.experience = None
 
     # ── Persistence ────────────────────────────────────────────────────
     def save_state(self):

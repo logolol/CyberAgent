@@ -136,7 +136,90 @@ class EnumVulnAgent(BaseAgent):
         from utils.llm_factory import warm_model
         self.log_info("Pre-warming Qwen2.5:7b for enumeration...")
         warm_model(role="default")
-
+    
+    # ── Version-aware CVE filtering helpers ──────────────────────────────────────
+    
+    def _parse_version(self, version_string: str) -> tuple[int, int, int] | None:
+        """
+        Parse version string into (major, minor, patch) tuple.
+        Returns None if parsing fails.
+        
+        Examples:
+            "Apache 2.4.29" → (2, 4, 29)
+            "vsftpd 2.3.4" → (2, 3, 4)
+            "Samba 3.0.20" → (3, 0, 20)
+        """
+        try:
+            # Extract version numbers from string
+            match = re.search(r'(\d+)\.(\d+)\.(\d+)', version_string)
+            if match:
+                return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            
+            # Try shorter format (major.minor)
+            match = re.search(r'(\d+)\.(\d+)', version_string)
+            if match:
+                return (int(match.group(1)), int(match.group(2)), 0)
+            
+            return None
+        except Exception:
+            return None
+    
+    def _version_matches(self, detected_version: str, cve_affected: str) -> bool:
+        """
+        Check if detected service version matches CVE's affected range.
+        
+        Simple heuristic:
+        - Exact version match (e.g., "2.4.29" in "2.4.29")
+        - Major.minor match (e.g., "2.4.x" matches "2.4.29")
+        - Range check if brackets present (e.g., "(2.4.20-2.4.29)")
+        
+        Args:
+            detected_version: Version from service scan (e.g., "Apache 2.4.29")
+            cve_affected: Affected versions from CVE (e.g., "2.4.20-2.4.29" or "2.4.x")
+        
+        Returns:
+            True if versions match, False otherwise
+        """
+        if not detected_version or not cve_affected:
+            return True  # Can't filter without data, keep it
+        
+        # Parse detected version
+        detected_parsed = self._parse_version(detected_version)
+        if not detected_parsed:
+            return True  # Can't parse, keep it
+        
+        detected_major, detected_minor, detected_patch = detected_parsed
+        
+        # Exact version match
+        if f"{detected_major}.{detected_minor}.{detected_patch}" in cve_affected:
+            return True
+        if f"{detected_major}.{detected_minor}" in cve_affected:
+            return True
+        
+        # Major.minor.x wildcard match
+        if f"{detected_major}.{detected_minor}.x" in cve_affected.lower():
+            return True
+        
+        # Range match (e.g., "2.4.20-2.4.50")
+        range_match = re.search(
+            r'(\d+)\.(\d+)\.(\d+)\s*-\s*(\d+)\.(\d+)\.(\d+)',
+            cve_affected
+        )
+        if range_match:
+            start_major, start_minor, start_patch = int(range_match.group(1)), int(range_match.group(2)), int(range_match.group(3))
+            end_major, end_minor, end_patch = int(range_match.group(4)), int(range_match.group(5)), int(range_match.group(6))
+            
+            # Check if detected version is within range
+            detected_tuple = (detected_major, detected_minor, detected_patch)
+            start_tuple = (start_major, start_minor, start_patch)
+            end_tuple = (end_major, end_minor, end_patch)
+            
+            if start_tuple <= detected_tuple <= end_tuple:
+                return True
+        
+        # No match found
+        return False
+    
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def run(self, target: str, briefing: dict = {}) -> dict:
@@ -1710,6 +1793,44 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
             if not isinstance(vuln, dict):
                 continue
+            
+            # ── VERSION-AWARE CVE FILTERING ────────────────────────────
+            # Check if detected CVE actually applies to this service version
+            cve = vuln.get("cve", "")
+            if cve and cve != "CVE-UNKNOWN":
+                # Get service version from detected ports
+                service_version = str(item.get("version", ""))
+                if not service_version:
+                    # Try to find version from ports list
+                    for p in ports:
+                        if str(p.get("service", "")).lower() == service.lower():
+                            service_version = str(p.get("version", ""))
+                            break
+                
+                # If we have version, check if CVE applies
+                if service_version:
+                    # Query RAG for CVE affected versions
+                    try:
+                        cve_detail = self.chroma.cve_lookup(cve, n=1)
+                        if cve_detail:
+                            affected_versions = cve_detail[0].get("text", "")
+                            
+                            # Check version match
+                            if not self._version_matches(service_version, affected_versions):
+                                self.log_warning(
+                                    f"CVE {cve} filtered out: version mismatch "
+                                    f"(detected={service_version}, affected={affected_versions[:60]})"
+                                )
+                                # Mark as low confidence instead of removing
+                                vuln["confirmed"] = False
+                                vuln["exploitable"] = False
+                                vuln["evidence"] = f"Version mismatch: {service_version} not in affected range"
+                                if vuln.get("severity") in ["critical", "high"]:
+                                    vuln["severity"] = "low"
+                                vuln["cvss_score"] = max(0.0, float(vuln.get("cvss_score", 0.0)) - 5.0)
+                    except Exception as e:
+                        # Can't verify version, keep the vuln but note it
+                        self.log_warning(f"Version check failed for {cve}: {e}")
 
             guarded = self.hallucination_guard(vuln, "vuln_scan")
             if isinstance(guarded, dict):
@@ -1883,7 +2004,7 @@ Use only evidence above — do not invent:
         batch_result = None
         
         try:
-            raw = self._llm_with_timeout(prompt, timeout=90)
+            raw = self._llm_with_timeout(prompt, timeout=180)  # Increased from 90s
             if raw and raw.strip():
                 batch_result = _extract_json_array(raw)
                 if batch_result:
@@ -2118,8 +2239,8 @@ Return JSON:
 "attack_sequence":["step1","step2"],"confidence":"high|medium|low"}}"""
             
             try:
-                self.log_info("Attempting LLM attack path analysis (60s timeout)...")
-                raw = self._llm_with_timeout(attack_prompt, timeout=60)
+                self.log_info("Attempting LLM attack path analysis (180s timeout)...")
+                raw = self._llm_with_timeout(attack_prompt, timeout=180)  # Increased from 60s
                 if raw:
                     llm_attack = self._extract_json_robust(raw)
                     if llm_attack and isinstance(llm_attack, dict) and llm_attack.get("critical_path"):
