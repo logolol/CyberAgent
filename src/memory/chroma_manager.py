@@ -39,12 +39,42 @@ class ChromaManager:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def semantic_search(self, collection: str, query: str, n_results: int = 5) -> list[dict]:
+    def semantic_search(self, collection: str, query: str, n_results: int = 5,
+                         cve_filter: str = None) -> list[dict]:
+        """
+        Search collection semantically, with optional CVE exact-match filter.
+        
+        Args:
+            collection: Collection name
+            query: Search query
+            n_results: Max results
+            cve_filter: If provided, filter results to only this CVE ID
+        """
         col = self.get_collection(collection)
         if col.count() == 0:
             return []
         try:
-            res = col.query(query_texts=[query], n_results=min(n_results, col.count()))
+            # Build where filter for CVE exact match if requested
+            where_filter = None
+            if cve_filter and cve_filter.startswith("CVE-"):
+                # Try multiple metadata field names
+                where_filter = {
+                    "$or": [
+                        {"cve_id": cve_filter},
+                        {"cve": cve_filter},
+                        {"CVE": cve_filter},
+                    ]
+                }
+            
+            if where_filter:
+                res = col.query(
+                    query_texts=[query],
+                    where=where_filter,
+                    n_results=min(n_results, col.count())
+                )
+            else:
+                res = col.query(query_texts=[query], n_results=min(n_results, col.count()))
+            
             results = []
             for i, doc in enumerate(res["documents"][0]):
                 results.append({
@@ -56,6 +86,64 @@ class ChromaManager:
         except Exception as e:
             _log.error(f"semantic_search({collection}) error: {e}")
             return []
+    
+    def cve_lookup(self, cve_id: str, collections: list[str] = None) -> list[dict]:
+        """
+        Look up a specific CVE across collections with exact match.
+        
+        This ensures we get results for the EXACT CVE requested,
+        not semantically similar but different CVEs.
+        """
+        if not cve_id or not cve_id.startswith("CVE-"):
+            return []
+        
+        target_collections = collections or ["cve_database", "exploitdb", "nuclei_templates"]
+        all_results = []
+        
+        for col_name in target_collections:
+            col = self.get_collection(col_name)
+            if col.count() == 0:
+                continue
+            
+            try:
+                # First try metadata filter
+                for field in ["cve_id", "cve", "CVE"]:
+                    try:
+                        res = col.query(
+                            query_texts=[cve_id],
+                            where={field: cve_id},
+                            n_results=10
+                        )
+                        if res["documents"][0]:
+                            for i, doc in enumerate(res["documents"][0]):
+                                all_results.append({
+                                    "text": doc,
+                                    "metadata": res["metadatas"][0][i],
+                                    "distance": res["distances"][0][i] if "distances" in res else 0.0,
+                                    "collection": col_name,
+                                })
+                            break
+                    except Exception:
+                        continue
+                
+                # Fallback: semantic search with CVE in query
+                if not all_results:
+                    res = col.query(query_texts=[cve_id], n_results=5)
+                    for i, doc in enumerate(res["documents"][0]):
+                        # Only include if CVE appears in text or metadata
+                        meta = res["metadatas"][0][i]
+                        if cve_id in doc or cve_id in str(meta.values()):
+                            all_results.append({
+                                "text": doc,
+                                "metadata": meta,
+                                "distance": res["distances"][0][i] if "distances" in res else 0.5,
+                                "collection": col_name,
+                            })
+                            
+            except Exception as e:
+                _log.warning(f"cve_lookup({col_name}) error: {e}")
+        
+        return all_results
 
     def add_finding(self, collection: str, finding_dict: dict):
         col = self.get_collection(collection)

@@ -1,5 +1,56 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 14 (Exploitation Pipeline Fixes)
+
+Sprint: S14
+Commits: `42b53f4`, `3763edb`, (pending)
+
+### Critical Fix: ExploitCandidate Execution Methods
+- **Root cause**: `_fallback_candidate_extraction()` created candidates with NO execution methods
+- [x] `exploit_reasoner.py` — Added `service_msf_modules` dict with known MSF modules
+- [x] `exploit_reasoner.py` — Extracts MSF module paths from RAG text via regex
+- [x] `exploit_reasoner.py` — Only returns candidates that have at least ONE execution method
+- **Result**: Fixes 50+ "Candidate has no execution method" errors
+
+### Critical Fix: MSF False Positive Detection
+- **Root cause**: Config lines (RHOSTS =>, LPORT =>) appear BEFORE exploit runs
+- **Old logic**: Rejected if session_opened AND config_lines (always false positive)
+- [x] `exploitation_agent.py` — Session opened patterns are now definitive success
+- [x] `exploitation_agent.py` — Config lines no longer cause rejection
+- **Result**: MSF sessions now detected correctly
+
+### Fix: CVE Exact Match in RAG
+- **Root cause**: Semantic search returned wrong CVEs (CVE-2023-6610 instead of CVE-2007-2447)
+- [x] `chroma_manager.py` — Added `cve_lookup()` method with metadata filter
+- [x] `chroma_manager.py` — Falls back to text search if metadata filter fails
+- [x] `exploit_reasoner.py` — Calls `cve_lookup()` FIRST for CVE queries
+- **Result**: Exact CVE matches for exploitation
+
+### Fix: LLM Generates Exploit Commands (Not Scans)
+- **Root cause**: LLM suggested `nmap --script smb-vuln-ms17-010` for CVE-2007-2447
+- [x] `exploitation_agent.py` — Added "MUST EXPLOIT NOT SCAN" to prompt
+- [x] `exploitation_agent.py` — Added CORRECT/WRONG examples
+- [x] `exploitation_agent.py` — Removed scan tools from available tools list
+- **Result**: LLM generates actual exploit commands
+
+### Fix: EXPLOIT_HINTS Wired to Execution
+- **Root cause**: MSF found correct module but ignored validated payload/options
+- [x] `exploitation_agent.py` — Added `_get_hint_for_module()` helper
+- [x] `exploitation_agent.py` — `_try_msf_x_exploit()` checks EXPLOIT_HINTS first
+- [x] `exploitation_agent.py` — Uses validated payload/options from hints
+- **Result**: Known-good exploits use validated configurations
+
+### Fix: LLM Timeouts Reduced
+- [x] `exploitation_agent.py` — 300s → 60s for exploit reasoning
+- [x] `exploitation_agent.py` — 300s → 90s for intelligent tool execution
+- **Result**: Faster fallback to alternative methods
+
+### Remaining (Documented for Future)
+- [ ] True ReAct loop in ExploitationAgent (react() exists but not called)
+- [ ] AnalyzerAgent for dynamic phase ordering
+
+---
+
 ## ✅ Completed — Day 13 (Service-Aware Credential Execution)
 
 Sprint: S13
