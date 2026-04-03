@@ -218,6 +218,96 @@ class PrivEscAgent(BaseAgent):
                 pass
             with self._socket_lock:
                 self._shell_socket = None
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # TASK 4: Persistent shell methods
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    def _get_shell_from_memory(self, target: str) -> dict | None:
+        """
+        TASK 4: Retrieve persistent shell from MissionMemory.
+        
+        Args:
+            target: Target IP address
+        
+        Returns:
+            Shell dict if found, None otherwise
+        """
+        try:
+            context = self.memory.get_full_context()
+            hosts = context.get("hosts", {})
+            
+            # Check all hosts for shells
+            for ip, host_data in hosts.items():
+                if ip == target or host_data.get("hostname") == target:
+                    shells = host_data.get("shells", [])
+                    if shells:
+                        # Return first shell (prefer bindshell over reverse)
+                        for shell in shells:
+                            if shell.get("type") == "bindshell":
+                                self.log_info(f"[PERSISTENT] Found bindshell: {shell.get('ip')}:{shell.get('port')}")
+                                return shell
+                        # No bindshell, return first shell
+                        self.log_info(f"[PERSISTENT] Found shell: {shells[0].get('type')}")
+                        return shells[0]
+            
+            return None
+        except Exception as e:
+            self.log_warning(f"[PERSISTENT] Error retrieving shell: {e}")
+            return None
+    
+    def _execute_command_on_persistent_shell(
+        self,
+        shell: dict,
+        command: str,
+        timeout: int = 15
+    ) -> str:
+        """
+        TASK 4: Execute command on persistent shell.
+        
+        Args:
+            shell: Shell dict from _get_shell_from_memory
+            command: Command to execute
+            timeout: Command timeout in seconds
+        
+        Returns:
+            Command output
+        """
+        shell_type = shell.get("type", "unknown")
+        
+        if shell_type == "bindshell":
+            # Reuse existing _connect_shell and _exec_shell_cmd logic
+            port = shell.get("port", 0)
+            ip = shell.get("ip", self.target)
+            
+            if self._connect_shell(ip, port):
+                return self._exec_shell_cmd(ip, port, command, timeout)
+        
+        elif shell_type == "ssh_credential":
+            # Use SSH with credentials
+            user = shell.get("user", "")
+            password = shell.get("password", "")
+            target = shell.get("ip", self.target)
+            
+            if user and password:
+                try:
+                    result = subprocess.run(
+                        ["sshpass", "-p", password, "ssh",
+                         "-o", "StrictHostKeyChecking=no",
+                         "-o", "UserKnownHostsFile=/dev/null",
+                         "-o", "ConnectTimeout=5",
+                         f"{user}@{target}", command],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout
+                    )
+                    return result.stdout + result.stderr
+                except Exception as e:
+                    self.log_warning(f"[PERSISTENT] SSH exec failed: {e}")
+                    return ""
+        
+        # Unknown shell type or execution failed
+        return ""
 
     def run(self, target: str, briefing: dict = {}) -> dict:
         """
