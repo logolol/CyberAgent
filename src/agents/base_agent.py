@@ -555,6 +555,31 @@ class BaseAgent:
                 return {"stored": False, "error": str(e)}
 
         # ══════════════════════════════════════════════════════════════════════
+        # FIX 2: SEARCHSPLOIT DICT INPUT HANDLING
+        # When action_input is dict with "cve", "query", "service" etc.,
+        # extract the query string for searchsploit
+        # ══════════════════════════════════════════════════════════════════════
+        if action == "searchsploit":
+            # Extract query from various possible dict formats
+            query_str = ""
+            if isinstance(action_input, dict):
+                query_str = (
+                    action_input.get("cve") or 
+                    action_input.get("query") or 
+                    action_input.get("service") or 
+                    action_input.get("search") or
+                    action_input.get("term") or
+                    ""
+                )
+            elif isinstance(action_input, str):
+                query_str = action_input
+            
+            if query_str:
+                return self.tools.use("searchsploit", args=[query_str], purpose="exploit lookup")
+            else:
+                return {"error": "searchsploit requires a search term", "input": action_input}
+
+        # ══════════════════════════════════════════════════════════════════════
         # INTELLIGENT TOOL EXECUTION: LLM generates args, with fallback
         # ══════════════════════════════════════════════════════════════════════
         tool_args = action_input.get("args", [])
@@ -1087,6 +1112,15 @@ class BaseAgent:
             title=f"[red]✗ {self.agent_name}[/]",
             border_style="red",
         ))
+
+    def log_debug(self, msg: str):
+        """Debug logging - only prints if debug mode is enabled."""
+        if getattr(self, 'debug_mode', False):
+            self.console.print(Panel(
+                f"[dim white]{msg}[/]",
+                title=f"[dim cyan]🐛 {self.agent_name}[/]",
+                border_style="dim cyan",
+            ))
 
     def _llm_with_timeout(
         self, prompt: str, timeout: int = 300

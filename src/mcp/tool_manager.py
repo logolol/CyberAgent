@@ -133,6 +133,43 @@ class DynamicToolManager:
     Drop-in replacement for ToolExecutor — but fully dynamic.
     """
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # FIX 6: TOOL-SPECIFIC TIMEOUTS
+    # Long-running tools get longer timeouts; short tools get shorter timeouts
+    # ══════════════════════════════════════════════════════════════════════════
+    TOOL_TIMEOUTS = {
+        # Long-running exploitation tools (180s)
+        "msfconsole": 180,
+        "msfvenom": 120,
+        "metasploit": 180,
+        # Network scanning (180s for thorough scans)
+        "nmap": 180,
+        "masscan": 120,
+        "nuclei": 180,
+        # Brute-forcing (90s with manual fallback)
+        "hydra": 90,
+        "medusa": 90,
+        "crackmapexec": 90,
+        "cme": 90,
+        # Quick lookups (30s)
+        "searchsploit": 30,
+        "whatweb": 30,
+        "curl": 30,
+        "wget": 30,
+        # Web scanning (120s)
+        "nikto": 120,
+        "gobuster": 120,
+        "dirb": 120,
+        "ffuf": 120,
+        "wfuzz": 120,
+        # SMB/shares (60s)
+        "smbclient": 60,
+        "enum4linux": 60,
+        "enum4linux-ng": 60,
+        # Default
+        "_default": 300,
+    }
+
     def __init__(self):
         self.discovered: dict[str, str] = {}       # {name: abs_path}
         self.installed_this_session: list[dict] = []
@@ -332,13 +369,20 @@ class DynamicToolManager:
     # ── Core use() ───────────────────────────────────────────────────────────
 
     def use(self, tool_name: str, args: list,
-            purpose: str = "", timeout: int = 300,
+            purpose: str = "", timeout: int = None,
             output_file: Optional[str] = None) -> dict:
         """
         Find (or auto-install) a tool and run it.
         Returns structured result dict — never raises.
+        
+        FIX 6: Uses tool-specific timeouts from TOOL_TIMEOUTS dict.
+        If timeout is not provided, looks up tool-specific default.
         """
         self._usage_log[tool_name] = self._usage_log.get(tool_name, 0) + 1
+
+        # FIX 6: Use tool-specific timeout if not explicitly provided
+        if timeout is None:
+            timeout = self.TOOL_TIMEOUTS.get(tool_name, self.TOOL_TIMEOUTS["_default"])
 
         path = self.find(tool_name)
         if not path:
@@ -362,33 +406,49 @@ class DynamicToolManager:
 
         cmd = [path] + [str(a) for a in args]
         cmd_str = " ".join(shlex.quote(c) for c in cmd)
-        console.print(f"[dim][[ToolManager]] ▶ {cmd_str[:120]}[/]")
+        console.print(f"[dim][[ToolManager]] ▶ {cmd_str[:120]} (timeout={timeout}s)[/]")
 
         t0 = time.time()
+        proc = None
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=timeout, env=os.environ.copy(),
+            # FIX 6: Use Popen for better timeout handling and process kill
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                text=True, env=os.environ.copy(),
             )
+            stdout, stderr = proc.communicate(timeout=timeout)
             duration = time.time() - t0
             result = {
                 "success": proc.returncode == 0,
                 "tool": tool_name,
                 "command": cmd_str,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
                 "returncode": proc.returncode,
                 "duration": round(duration, 2),
                 "purpose": purpose,
             }
         except subprocess.TimeoutExpired:
+            # FIX 6: Kill the process on timeout
+            if proc:
+                console.print(f"[red][[ToolManager]] ✗ Timeout ({timeout}s) - killing {tool_name} (pid={proc.pid})[/]")
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)  # Wait for process to die
+                except:
+                    pass
             result = {
                 "success": False, "tool": tool_name, "command": cmd_str,
                 "stdout": "", "stderr": "", "returncode": -1,
                 "duration": round(time.time() - t0, 2), "purpose": purpose,
-                "error": f"Timeout after {timeout}s",
+                "error": f"Timeout after {timeout}s (process killed)",
             }
         except Exception as e:
+            if proc:
+                try:
+                    proc.kill()
+                except:
+                    pass
             result = {
                 "success": False, "tool": tool_name, "command": cmd_str,
                 "stdout": "", "stderr": "", "returncode": -1,
