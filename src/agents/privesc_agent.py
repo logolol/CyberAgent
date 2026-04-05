@@ -321,29 +321,40 @@ class PrivEscAgent(BaseAgent):
         self.shell_info = briefing.get("shell_info", {})
         initial_user = briefing.get("initial_user", "unknown")
         
-        # Extract shell port from multiple possible sources
-        # Prioritize: shell dict lport/port > briefing shell_port > fallback 0
-        shells = briefing.get("shells", [])
+        # ══════════════════════════════════════════════════════════════════════
+        # STEP 7: SHELL RETRIEVAL - Check MissionMemory FIRST, then briefing
+        # ══════════════════════════════════════════════════════════════════════
         shell_port = 0
         shell_ip = target
         
-        if shells and isinstance(shells, list):
-            for shell in shells:
-                if isinstance(shell, dict):
-                    # Try multiple port field names
-                    port_candidate = (
-                        shell.get("lport") or 
-                        shell.get("port") or 
-                        shell.get("shell_port") or
-                        0
-                    )
-                    if port_candidate and int(port_candidate) > 0:
-                        shell_port = int(port_candidate)
-                        shell_ip = shell.get("ip") or shell.get("target_ip") or target
-                        initial_user = shell.get("user") or initial_user
-                        break
+        # Priority 1: Get shell from MissionMemory (written by ExploitationAgent)
+        memory_shell = self._get_shell_from_memory(target)
+        if memory_shell:
+            shell_port = memory_shell.get("port", 0) or memory_shell.get("lport", 0)
+            shell_ip = memory_shell.get("ip", target)
+            initial_user = memory_shell.get("user", initial_user)
+            self.log_success(f"[SHELL] Retrieved from MissionMemory: {shell_ip}:{shell_port} (user: {initial_user})")
         
-        # Fallback to old briefing fields if no valid shell port found
+        # Priority 2: Extract from briefing if MissionMemory didn't have shell
+        if not shell_port:
+            shells = briefing.get("shells", [])
+            if shells and isinstance(shells, list):
+                for shell in shells:
+                    if isinstance(shell, dict):
+                        # Try multiple port field names
+                        port_candidate = (
+                            shell.get("lport") or 
+                            shell.get("port") or 
+                            shell.get("shell_port") or
+                            0
+                        )
+                        if port_candidate and int(port_candidate) > 0:
+                            shell_port = int(port_candidate)
+                            shell_ip = shell.get("ip") or shell.get("target_ip") or target
+                            initial_user = shell.get("user") or initial_user
+                            break
+        
+        # Priority 3: Fallback to old briefing fields
         if not shell_port:
             shell_port_raw = self.shell_info.get("port") or briefing.get("shell_port") or 0
             shell_port = int(shell_port_raw)

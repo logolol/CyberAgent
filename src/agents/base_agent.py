@@ -162,21 +162,30 @@ class BaseAgent:
 
     # ── Prompt helpers ────────────────────────────────────────────────────────
 
-    def _format_rag(self, results: list[dict], max_per_hit: int = 250, max_results: int = 2) -> str:
+    def _format_rag(self, results: list[dict], max_chars: int = 500) -> str:
         """
         Convert ChromaDB result list into a prompt-injectable string.
         
         TASK 6: Limit RAG to 2 snippets max (was 8) to reduce prompt size.
         This prevents LLM timeouts from massive context windows.
+        
+        Args:
+            results: List of RAG result dicts with 'text' and 'source_collection'
+            max_chars: Maximum total characters to include (default 500)
         """
         if not results:
             return "No RAG results available."
         lines = []
-        for r in results[:max_results]:  # Changed from [:8] to [:max_results]
+        total_chars = 0
+        for r in results[:4]:  # Max 4 results
             src = r.get("source_collection", "unknown")
-            text = r["text"][:max_per_hit].replace("\n", " ")
-            lines.append(f"[{src}] {text}")
-        return "\n---\n".join(lines)
+            text = r.get("text", "")[:200].replace("\n", " ")
+            line = f"[{src}] {text}"
+            if total_chars + len(line) > max_chars:
+                break
+            lines.append(line)
+            total_chars += len(line)
+        return "\n---\n".join(lines) if lines else "No RAG results available."
 
     def _messages_to_prompt(self, messages: list[dict]) -> str:
         """
