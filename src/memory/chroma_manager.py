@@ -272,3 +272,96 @@ class ChromaManager:
         # Sort by semantic distance (lower = closer match for cosine)
         all_results.sort(key=lambda x: x.get("distance") or 999)
         return all_results[: n * 2]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # FIX 2: OS-Aware RAG Retrieval (Linux-filtered exploits)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def get_linux_exploits(
+        self,
+        query: str,
+        n: int = 5,
+        include_unix: bool = True,
+    ) -> list[dict]:
+        """
+        Search for exploits filtered to Linux/Unix platforms only.
+        
+        This prevents Windows/OSX exploits from being returned when targeting
+        Linux hosts (common issue with generic RAG queries).
+        
+        Args:
+            query: Semantic search query (e.g., "smb version 3.0 exploit")
+            n: Number of results to return
+            include_unix: If True, also include generic Unix exploits
+        
+        Returns:
+            List of exploit dicts filtered to Linux/Unix platforms
+        """
+        # Platform patterns to include
+        linux_patterns = ["linux", "unix", "multi"]
+        if include_unix:
+            linux_patterns.extend(["posix", "universal"])
+        
+        # Platform patterns to exclude
+        exclude_patterns = ["windows", "win32", "win64", "osx", "macos", "solaris", "aix", "hp-ux"]
+        
+        all_results: list[dict] = []
+        seen_texts: set[str] = set()
+        
+        # Search in exploit-relevant collections
+        exploit_collections = ["exploitdb", "cve_database", "payloads", "hacktricks"]
+        
+        # Enhance query with "linux" keyword
+        linux_query = f"{query} linux"
+        
+        for col_name in exploit_collections:
+            try:
+                # Try with Linux-enhanced query first
+                hits = self.semantic_search(col_name, linux_query, n_results=n * 2)
+                
+                for h in hits:
+                    # Deduplicate
+                    snippet = h["text"][:120]
+                    if snippet in seen_texts:
+                        continue
+                    
+                    # Check platform filtering
+                    text_lower = h["text"].lower()
+                    metadata = h.get("metadata", {})
+                    platform = str(metadata.get("platform", "")).lower()
+                    
+                    # Explicit platform metadata filtering
+                    if platform:
+                        # Check if platform is acceptable
+                        is_linux = any(p in platform for p in linux_patterns)
+                        is_excluded = any(p in platform for p in exclude_patterns)
+                        
+                        if is_excluded and not is_linux:
+                            continue
+                    else:
+                        # No explicit platform, use heuristics on text
+                        is_excluded = any(p in text_lower for p in exclude_patterns)
+                        is_linux = any(p in text_lower for p in linux_patterns)
+                        
+                        # Skip if clearly Windows-only
+                        if is_excluded and not is_linux:
+                            continue
+                    
+                    seen_texts.add(snippet)
+                    h["source_collection"] = col_name
+                    h["_linux_filtered"] = True
+                    all_results.append(h)
+                    
+            except Exception as e:
+                _log.warning(f"Linux exploit search in {col_name} failed: {e}")
+        
+        # Sort by semantic distance
+        all_results.sort(key=lambda x: x.get("distance") or 999)
+        
+        # If we have very few results, fall back to unfiltered query
+        if len(all_results) < 2:
+            _log.info(f"Linux-filtered RAG returned {len(all_results)} results, falling back to unfiltered")
+            return self.get_rag_context(query, collections=exploit_collections, n=n)
+        
+        return all_results[:n * 2]
+

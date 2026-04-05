@@ -211,19 +211,54 @@ class BaseAgent:
             prompt_key = snake if snake in AGENT_PROMPTS else None
 
         if prompt_key:
-            return get_agent_prompt(
+            base_prompt = get_agent_prompt(
                 agent_name=prompt_key,
                 target=self.memory.target,
                 mission_state=self.memory.get_full_context(),
                 rag_context=rag_str,
             )
-        # Graceful fallback for agents without a registered prompt
-        return (
-            f"You are {self.agent_name}, an expert penetration tester.\n"
-            f"Target: {self.memory.target}\n\n"
-            f"ANTI-HALLUCINATION: Only cite CVEs returned by RAG. Never invent findings.\n\n"
-            f"RAG CONTEXT:\n{rag_str}"
-        )
+        else:
+            # Graceful fallback for agents without a registered prompt
+            base_prompt = (
+                f"You are {self.agent_name}, an expert penetration tester.\n"
+                f"Target: {self.memory.target}\n\n"
+                f"ANTI-HALLUCINATION: Only cite CVEs returned by RAG. Never invent findings.\n\n"
+                f"RAG CONTEXT:\n{rag_str}"
+            )
+        
+        # FIX 1: Append ReAct few-shot instructions
+        react_instructions = """
+
+## CRITICAL: ReAct Format Instructions
+
+You MUST execute at least ONE ACTION before returning FINAL_ANSWER.
+Never skip directly to FINAL_ANSWER without tool execution.
+
+### Correct Example (DO THIS):
+
+THOUGHT: I need to scan the target for open services.
+ACTION: nmap
+ACTION_INPUT: {"args": ["-sV", "-sC", "-p-", "192.168.80.128"]}
+
+After receiving OBSERVATION, analyze and continue:
+
+THOUGHT: Port 21 is open running vsftpd 2.3.4 which has a known backdoor.
+ACTION: searchsploit
+ACTION_INPUT: {"args": ["vsftpd 2.3.4"]}
+
+Only after gathering evidence:
+
+THOUGHT: I have confirmed the target has vulnerable services.
+FINAL_ANSWER: {"success": true, "findings": [...]}
+
+### WRONG Example (NEVER DO THIS):
+
+THOUGHT: I think the target might have vulnerabilities.
+FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
+
+### Rule: ACTION count >= 1 before FINAL_ANSWER
+"""
+        return base_prompt + react_instructions
 
     # ── Response parser ───────────────────────────────────────────────────────
 
