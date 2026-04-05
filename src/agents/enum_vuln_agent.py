@@ -2915,7 +2915,7 @@ Return JSON:
 
         return self._normalize_host_ip(self.target)
 
-    def _format_rag(self, results: list[dict[str, Any]], max_chars: int) -> str:
+    def _format_rag(self, results: list[dict[str, Any]], max_chars: int = 500) -> str:
         """Compact formatting for RAG snippets."""
         if not results:
             return ""
