@@ -668,6 +668,22 @@ class BaseAgent:
 
             # ── FINAL_ANSWER ─────────────────────────────────────────────
             if parsed["final_answer"] is not None:
+                # CRITICAL FIX: Reject early FINAL_ANSWER if no actions taken
+                if len(actions_taken) == 0 and i == 0:
+                    self.log_warning("LLM returned FINAL_ANSWER without executing any actions - requesting reformat")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You must execute at least one ACTION before returning FINAL_ANSWER.\n"
+                            "For enumeration, start with:\n"
+                            "ACTION: nmap\n"
+                            "ACTION_INPUT: {\"args\": [\"-sV\", \"-sC\", \"-p-\", \"TARGET_IP\"]}\n\n"
+                            "Then analyze the results and continue with more tools.\n"
+                            "Only return FINAL_ANSWER after discovering findings."
+                        ),
+                    })
+                    continue
+                
                 self.log_success(f"Done after {i+1} iteration(s)")
                 # Run hallucination guard before returning
                 phase = getattr(self, "current_phase", "unknown")
