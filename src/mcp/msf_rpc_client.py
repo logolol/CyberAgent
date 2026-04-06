@@ -124,8 +124,20 @@ class MsfRpcClientWrapper:
                 except Exception as e:
                     return (False, None, f"Failed to load module {module_path}: {e}")
                 
-                # Set options
+                # FIX 3: Validate options exist before setting
+                try:
+                    available_options = exploit.options
+                    _log.debug(f"Available options: {list(available_options.keys())}")
+                except Exception:
+                    available_options = {}
+                
+                # Set options (only if they exist)
                 for key, value in options.items():
+                    # Always try to set common options, but validate if available_options exists
+                    if available_options and key not in available_options:
+                        _log.debug(f"  Skipping {key} (not in module options)")
+                        continue
+                    
                     try:
                         exploit[key] = value
                         _log.debug(f"  Set {key} = {value}")
