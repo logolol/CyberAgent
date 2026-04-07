@@ -83,7 +83,7 @@ class BaseAgent:
         agent_name: str,
         mission_memory: MissionMemory,
         llm_role: str = "default",
-        max_react_iterations: int = 10,
+        max_react_iterations: int = 3,  # FIX 4: Reduced from 10 to 3 for faster fallback
     ):
         self.agent_name = agent_name
         self.llm = get_llm(role=llm_role)
@@ -607,14 +607,19 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
             # Extract query from various possible dict formats
             query_str = ""
             if isinstance(action_input, dict):
-                query_str = (
-                    action_input.get("cve") or 
-                    action_input.get("query") or 
-                    action_input.get("service") or 
-                    action_input.get("search") or
-                    action_input.get("term") or
-                    ""
-                )
+                # FIX 12: Also handle "args" list
+                args_list = action_input.get("args", [])
+                if args_list and isinstance(args_list, list):
+                    query_str = " ".join(str(a) for a in args_list)
+                else:
+                    query_str = (
+                        action_input.get("cve") or 
+                        action_input.get("query") or 
+                        action_input.get("service") or 
+                        action_input.get("search") or
+                        action_input.get("term") or
+                        ""
+                    )
             elif isinstance(action_input, str):
                 query_str = action_input
             

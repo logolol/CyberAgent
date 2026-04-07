@@ -773,10 +773,11 @@ class FirewallDetectionAgent(BaseAgent):
     def _log_to_memory(self, target_ip: str, profile: str, results: dict) -> None:
         """Log firewall detection results to MissionMemory."""
         try:
+            # FIX 7: Use positional arguments - log_action(agent_name, action, result)
             self.memory.log_action(
-                agent=self.agent_name,
-                action="firewall_detection",
-                result=f"Profile: {profile}, Score: {self.firewall_score:.2f}, Tech: {self.detected_technologies}"
+                self.agent_name,
+                "firewall_detection",
+                f"Profile: {profile}, Score: {self.firewall_score:.2f}, Tech: {self.detected_technologies}"
             )
             
             # Store evasion profile for other agents to use

@@ -87,12 +87,19 @@ class ChromaManager:
             _log.error(f"semantic_search({collection}) error: {e}")
             return []
     
-    def cve_lookup(self, cve_id: str, collections: list[str] = None) -> list[dict]:
+    def cve_lookup(self, cve_id: str, collections: list[str] = None, n: int = 10) -> list[dict]:
         """
         Look up a specific CVE across collections with exact match.
         
+        FIX 6: Added n parameter for result limit.
+        
         This ensures we get results for the EXACT CVE requested,
         not semantically similar but different CVEs.
+        
+        Args:
+            cve_id: CVE identifier (e.g., "CVE-2021-41773")
+            collections: Collections to search (default: cve_database, exploitdb, nuclei)
+            n: Maximum results to return (default: 10)
         """
         if not cve_id or not cve_id.startswith("CVE-"):
             return []
@@ -112,7 +119,7 @@ class ChromaManager:
                         res = col.query(
                             query_texts=[cve_id],
                             where={field: cve_id},
-                            n_results=10
+                            n_results=n
                         )
                         if res["documents"][0]:
                             for i, doc in enumerate(res["documents"][0]):
