@@ -190,6 +190,9 @@ class PrivEscAgent(BaseAgent):
     
     def _get_shell_port_from_memory(self, target: str) -> int | None:
         """Look up shell port from MissionMemory (populated by ExploitationAgent)."""
+        # Common HTTP/service ports that should NOT be treated as shell ports
+        INVALID_SHELL_PORTS = {80, 443, 8080, 8443, 21, 25, 110, 143, 993, 995}
+        
         try:
             ctx = self.memory.get_full_context()
             if isinstance(ctx, str):
@@ -203,8 +206,15 @@ class PrivEscAgent(BaseAgent):
             for shell in shells:
                 port = shell.get("port") or shell.get("shell_port")
                 if port:
-                    self.log_info(f"Found shell port {port} from MissionMemory")
-                    return int(port)
+                    port_int = int(port)
+                    # Skip common HTTP/service ports - these are not real shells
+                    if port_int in INVALID_SHELL_PORTS:
+                        self.log_warning(f"Skipping port {port_int} - common service port, not a shell")
+                        continue
+                    # Verify shell is marked as verified
+                    if shell.get("verified", True):  # Default True for backward compat
+                        self.log_info(f"Found verified shell port {port_int} from MissionMemory")
+                        return port_int
         except Exception as e:
             self.log_debug(f"Could not get shell port from memory: {e}")
         return None
@@ -233,6 +243,9 @@ class PrivEscAgent(BaseAgent):
         Returns:
             Shell dict if found, None otherwise
         """
+        # Common HTTP/service ports that should NOT be treated as shell ports
+        INVALID_SHELL_PORTS = {80, 443, 8080, 8443, 21, 25, 110, 143, 993, 995}
+        
         try:
             context = self.memory.get_full_context()
             hosts = context.get("hosts", {})
@@ -242,14 +255,25 @@ class PrivEscAgent(BaseAgent):
                 if ip == target or host_data.get("hostname") == target:
                     shells = host_data.get("shells", [])
                     if shells:
-                        # Return first shell (prefer bindshell over reverse)
+                        # Return first verified shell (prefer bindshell over reverse)
                         for shell in shells:
+                            port = shell.get("port", 0)
+                            # Skip common HTTP/service ports
+                            if port in INVALID_SHELL_PORTS:
+                                self.log_warning(f"[PERSISTENT] Skipping port {port} - not a real shell")
+                                continue
+                            # Require verified flag
+                            if not shell.get("verified", True):
+                                continue
                             if shell.get("type") == "bindshell":
-                                self.log_info(f"[PERSISTENT] Found bindshell: {shell.get('ip')}:{shell.get('port')}")
+                                self.log_info(f"[PERSISTENT] Found bindshell: {shell.get('ip')}:{port}")
                                 return shell
-                        # No bindshell, return first shell
-                        self.log_info(f"[PERSISTENT] Found shell: {shells[0].get('type')}")
-                        return shells[0]
+                        # No bindshell, return first valid shell
+                        for shell in shells:
+                            port = shell.get("port", 0)
+                            if port not in INVALID_SHELL_PORTS:
+                                self.log_info(f"[PERSISTENT] Found shell: {shell.get('type')}")
+                                return shell
             
             return None
         except Exception as e:

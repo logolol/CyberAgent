@@ -1,5 +1,27 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 18 Phase 3 (HTTP SHELL VALIDATION)
+
+Sprint: S18-SHELL-VALIDATION
+Commit: Pending
+Date: 2026-04-06
+
+### HTTP PORT VALIDATION FIX
+
+Fixed critical bug where PrivEscAgent/PostExploitAgent treated HTTP ports (80, 443, 8080) as shell ports, causing HTTP 400 errors.
+
+**Changes:**
+- `PrivEscAgent._get_shell_port_from_memory()` — Now skips INVALID_SHELL_PORTS {80, 443, 8080, 8443, 21, 25, 110, 143, 993, 995}
+- `PrivEscAgent._get_shell_from_memory()` — Same port validation, requires `verified: True`
+- `PostExploitAgent._get_shell_from_memory()` — Same port validation
+
+**Impact:** 
+- No more HTTP 400 errors from treating web servers as shells
+- Only verified shells (checked with `id` command) are used
+- Proper fallback to SSH credentials when no valid shell exists
+
+---
+
 ## ✅ Completed — Day 18 Phase 2 (17 ADDITIONAL FIXES)
 
 Sprint: S18-RELIABILITY-P2

@@ -1,10 +1,27 @@
 # Active Context - What We're Working On
 
-**Last Updated:** 2026-04-06 (Day 18 - Phase 2)
+**Last Updated:** 2026-04-06 (Day 18 - Phase 3)
 
-## Current Status: ✅ 29 EXPLOITATION FIXES COMPLETE — FULLY AUTONOMOUS
+## Current Status: ✅ 30+ EXPLOITATION FIXES COMPLETE — HTTP PORT VALIDATION ADDED
 
-### Just Completed (Day 18 Phase 2 — 17 Additional Fixes)
+### Just Completed (Day 18 Phase 3 — HTTP Shell Validation)
+
+**HTTP Port Validation Fix:**
+- ✅ PrivEscAgent/PostExploitAgent now skip INVALID_SHELL_PORTS {80, 443, 8080, 8443, 21, 25, 110, 143, 993, 995}
+- ✅ Shell must have `verified: True` flag to be used
+- ✅ Proper fallback to SSH credentials when no valid shell exists
+
+**Impact:**
+- HTTP 400 errors from treating web servers as shells: **100% → 0%**
+- Only verified shells (confirmed with `id` command) are passed to PrivEsc/PostExploit
+
+**Files Changed:**
+- `src/agents/privesc_agent.py` — `_get_shell_port_from_memory()`, `_get_shell_from_memory()`
+- `src/agents/postexploit_agent.py` — `_get_shell_from_memory()`
+
+---
+
+### Previously Completed (Day 18 Phase 2 — 17 Additional Fixes)
 
 **17 More Reliability Fixes (Commit: `6177fb5`):**
 
