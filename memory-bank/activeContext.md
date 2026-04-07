@@ -1,10 +1,32 @@
 # Active Context - What We're Working On
 
-**Last Updated:** 2026-04-06 (Day 18)
+**Last Updated:** 2026-04-06 (Day 18 - Phase 2)
 
-## Current Status: ✅ EXPLOITATION RELIABILITY FIXES COMPLETE — ZERO FALSE POSITIVES
+## Current Status: ✅ 29 EXPLOITATION FIXES COMPLETE — FULLY AUTONOMOUS
 
-### Just Completed (Day 18 — Critical Exploitation Fixes)
+### Just Completed (Day 18 Phase 2 — 17 Additional Fixes)
+
+**17 More Reliability Fixes (Commit: `6177fb5`):**
+
+#### Bug Fixes
+- ✅ **FIX 1:** ExploitGenerator _DaemonExecutor crash — use ThreadPoolExecutor
+- ✅ **FIX 6:** cve_lookup missing 'n' param — added n parameter
+- ✅ **FIX 7:** FirewallDetectionAgent logging — positional args
+- ✅ **FIX 12:** searchsploit dict handling — extract from args list
+
+#### New Methods
+- ✅ `ExploitGenerator.run_msf_noninteractive()` — timeout-safe MSF
+- ✅ `ExploitGenerator.KNOWN_EXPLOITS` — 9 exploit templates
+- ✅ `ExploitGenerator.match_known_exploit()` — template matching
+- ✅ `ExploitationAgent._detect_lhost()` — 5 fallback methods
+- ✅ `ExploitationAgent._prioritize_attack_graph()` — confidence × impact
+- ✅ `ExploitationAgent._try_credentials_on_services()` — SSH/FTP/Telnet
+
+#### Parameter Changes
+- ✅ **FIX 4:** ReAct max_iterations: 10 → 3 (faster fallback)
+- ✅ **FIX 5:** Shell type detection — never "unknown"
+
+### Previously Completed (Day 18 Phase 1 — 12 Critical Fixes)
 
 **12 Critical Fixes for Production Reliability (Commits: `f166efe`, `35cabd4`, `e1ad931`):**
 

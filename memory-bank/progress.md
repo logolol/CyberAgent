@@ -1,5 +1,41 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — Day 18 Phase 2 (17 ADDITIONAL FIXES)
+
+Sprint: S18-RELIABILITY-P2
+Commit: `6177fb5`
+Date: 2026-04-06
+
+### 17 ADDITIONAL RELIABILITY FIXES
+
+Building on the 12 critical fixes, implemented 17 more improvements for robust autonomous operation.
+
+**New Methods Added:**
+- `ExploitationAgent._detect_lhost(target)` - 5 fallback methods for IP detection
+- `ExploitationAgent._prioritize_attack_graph(nodes)` - confidence × impact scoring
+- `ExploitationAgent._try_credentials_on_services(target, services)` - SSH/FTP/Telnet reuse
+- `ExploitGenerator.run_msf_noninteractive()` - timeout-safe MSF execution
+- `ExploitGenerator.match_known_exploit()` - template matching
+
+**Bugs Fixed:**
+1. **ExploitGenerator _DaemonExecutor** - replaced broken custom ThreadPoolExecutor
+2. **FirewallDetectionAgent logging** - fixed positional args in log_action()
+3. **cve_lookup missing 'n' param** - added n parameter for result limiting
+4. **searchsploit dict handling** - extract from args list properly
+
+**New Features:**
+1. **KNOWN_EXPLOITS dict** - 9 common exploit templates (vsftpd, samba, distcc, etc.)
+2. **run_msf_noninteractive()** - non-blocking MSF command execution
+3. **_detect_lhost()** - reliable LHOST detection (route, socket, hostname fallbacks)
+4. **_prioritize_attack_graph()** - smart exploit ordering by confidence × impact
+5. **_try_credentials_on_services()** - reuse creds on SSH/FTP/Telnet
+
+**Parameter Changes:**
+1. **ReAct max_iterations** - reduced from 10 to 3 for faster fallback
+2. **Shell type detection** - never returns "unknown", defaults to "bindshell"
+
+---
+
 ## ✅ Completed — Day 18 (CRITICAL EXPLOITATION RELIABILITY FIXES)
 
 Sprint: S18-RELIABILITY
