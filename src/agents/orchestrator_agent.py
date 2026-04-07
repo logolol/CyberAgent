@@ -161,6 +161,96 @@ class OrchestratorAgent(BaseAgent):
             "credentials_found": [],
             "loot": [],
         }
+        
+        # COG02: Structured mission state for cognitive architecture
+        self.mission_state: dict = {
+            "target": "",
+            "phase": "init",
+            "known_hosts": [],
+            "open_ports": {},  # port -> service mapping
+            "service_versions": {},  # port -> version string
+            "vulnerabilities": [],  # list of {cve, service, port, exploitable}
+            "shells": [],  # list of {type, port, user}
+            "credentials": [],  # list of {user, pass, service}
+            "failed_attempts": [],  # commands that failed (avoid repetition)
+            "port_scan_done": False,  # prevent repeated full port scans
+            "enum_done": False,  # prevent repeated enumeration
+        }
+
+    def _update_mission_state(self, phase: str, result: dict) -> None:
+        """
+        COG02: Update structured mission state after each phase.
+        This prevents repetition and enables intelligent phase transitions.
+        """
+        if phase == "recon":
+            # Extract hosts and initial ports
+            hosts = result.get("hosts", [])
+            if hosts:
+                self.mission_state["known_hosts"].extend(hosts)
+            ports = result.get("open_ports", {})
+            if ports:
+                self.mission_state["open_ports"].update(ports)
+                self.mission_state["port_scan_done"] = True
+        
+        elif phase == "enumeration":
+            # Extract service versions and vulns
+            services = result.get("service_versions", {})
+            if services:
+                self.mission_state["service_versions"].update(services)
+            vulns = result.get("vulnerabilities", [])
+            if vulns:
+                self.mission_state["vulnerabilities"].extend(vulns)
+            self.mission_state["enum_done"] = True
+        
+        elif phase == "exploitation":
+            # Extract shells and credentials
+            shells = result.get("shells", [])
+            if shells:
+                self.mission_state["shells"].extend(shells)
+            creds = result.get("credentials", [])
+            if creds:
+                self.mission_state["credentials"].extend(creds)
+        
+        # Track failed attempts to avoid repetition
+        if result.get("failed_commands"):
+            self.mission_state["failed_attempts"].extend(result["failed_commands"])
+        
+        self.mission_state["phase"] = phase
+
+    def _should_skip_port_scan(self) -> bool:
+        """Check if full port scan already done."""
+        return self.mission_state.get("port_scan_done", False)
+    
+    def _get_phase_reasoning(self, current_phase: str, next_phase: str) -> str:
+        """
+        COG02: Generate reasoning for phase transition.
+        Used in Orchestrator prompt to explain decisions.
+        """
+        known = self.mission_state
+        
+        reasons = []
+        if current_phase == "recon" and next_phase == "enumeration":
+            ports_count = len(known.get("open_ports", {}))
+            reasons.append(f"Found {ports_count} open ports")
+            if ports_count > 0:
+                reasons.append("Need to identify vulnerabilities in services")
+        
+        elif current_phase == "enumeration" and next_phase == "exploitation":
+            vulns_count = len(known.get("vulnerabilities", []))
+            reasons.append(f"Found {vulns_count} potential vulnerabilities")
+            exploitable = [v for v in known.get("vulnerabilities", []) if v.get("exploitable")]
+            if exploitable:
+                reasons.append(f"{len(exploitable)} are exploitable")
+        
+        elif current_phase == "exploitation" and next_phase == "privesc":
+            shells = known.get("shells", [])
+            if shells:
+                user = shells[0].get("user", "unknown")
+                reasons.append(f"Got shell as {user}")
+                if user != "root":
+                    reasons.append("Need privilege escalation to root")
+        
+        return "; ".join(reasons) if reasons else f"Completing {current_phase}, moving to {next_phase}"
 
     def _get_mcp(self):
         """Lazy-load MCP PentestAI wrapper (one instance per orchestrator)."""

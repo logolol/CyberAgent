@@ -250,6 +250,18 @@ class EnumVulnAgent(BaseAgent):
                 f"Loaded reconnaissance context: {len(self.attack_surface)} host(s), "
                 f"{len(self.recon_findings.get('osint_context', []))} mission context item(s)"
             )
+            
+            # ══════════════════════════════════════════════════════════════
+            # COG04: Check if ports already known - skip full port scan
+            # ══════════════════════════════════════════════════════════════
+            known_ports = self._extract_known_ports(briefing)
+            port_scan_done = len(known_ports) > 0
+            
+            if port_scan_done:
+                self.log_info(f"[COG04] Using {len(known_ports)} pre-discovered ports (skipping -p- scan)")
+                # Pre-populate findings from briefing
+                for port_info in known_ports:
+                    self.all_results[f"port_{port_info.get('port', 0)}"] = port_info
 
             # ══════════════════════════════════════════════════════════════
             # ReAct LOOP: LLM-driven enumeration
@@ -260,6 +272,8 @@ class EnumVulnAgent(BaseAgent):
                 "hosts": self.attack_surface,
                 "findings": [],
                 "observations": [],
+                "port_scan_done": port_scan_done,  # COG04: Flag to skip full scan
+                "known_ports": known_ports,  # COG04: Pre-discovered ports
             }
             
             self.log_info("Starting ReAct enumeration loop...")
@@ -365,6 +379,58 @@ For each vulnerability, determine if it's exploitable.
 When you have enough findings, return FINAL_ANSWER with vulnerabilities list."""
 
     # ── Stage 1: mission briefing ─────────────────────────────────────────────
+    
+    def _extract_known_ports(self, briefing: dict | None) -> list[dict]:
+        """
+        COG04: Extract already-discovered ports from briefing/memory.
+        
+        This prevents redundant full port scans when ports are already known
+        from a previous recon phase.
+        
+        Returns:
+            List of port dicts: [{"port": 21, "service": "ftp", "version": "vsftpd 2.3.4"}, ...]
+        """
+        known_ports = []
+        
+        # From MissionMemory hosts
+        if hasattr(self.memory, '_state'):
+            hosts = self.memory._state.get("hosts", {})
+            for ip, host_data in hosts.items():
+                if isinstance(host_data, dict):
+                    for port_info in host_data.get("ports", []):
+                        if isinstance(port_info, dict) and port_info.get("port"):
+                            known_ports.append({
+                                "port": port_info.get("port"),
+                                "service": port_info.get("service", "unknown"),
+                                "version": port_info.get("version", ""),
+                                "ip": ip,
+                            })
+        
+        # From briefing (orchestrator may pass pre-discovered ports)
+        if isinstance(briefing, dict):
+            briefing_ports = briefing.get("open_ports", [])
+            if isinstance(briefing_ports, list):
+                for port_info in briefing_ports:
+                    if isinstance(port_info, dict) and port_info.get("port"):
+                        known_ports.append(port_info)
+            
+            # Also check known_info structure
+            known_info = briefing.get("known_info", {})
+            if isinstance(known_info, dict):
+                for port_info in known_info.get("ports", []):
+                    if isinstance(port_info, dict) and port_info.get("port"):
+                        known_ports.append(port_info)
+        
+        # Deduplicate by port number
+        seen_ports = set()
+        unique_ports = []
+        for p in known_ports:
+            port_num = p.get("port")
+            if port_num and port_num not in seen_ports:
+                seen_ports.add(port_num)
+                unique_ports.append(p)
+        
+        return unique_ports
 
     def _load_recon_findings(self, briefing: dict | None = None) -> dict[str, Any]:
         """

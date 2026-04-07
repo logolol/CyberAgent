@@ -93,6 +93,315 @@ class BaseAgent:
         self.console = Console()
         self.logger = logging.getLogger(f"agent.{agent_name}")
         self.max_iterations = max_react_iterations
+        
+        # Cognitive architecture state
+        self._executed_commands: set[str] = set()  # Prevent command repetition
+        self._phase_state: dict = {}  # Current phase context
+        self._reflection_log: list[dict] = []  # Track reasoning
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # COGNITIVE ARCHITECTURE: Plan → Execute → Reflect → Adapt
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    def cognitive_cycle(
+        self,
+        goal: str,
+        known_intel: dict,
+        max_cycles: int = 5
+    ) -> dict:
+        """
+        Execute a full cognitive cycle: Plan → Select → Execute → Reflect → Adapt.
+        
+        This is the core reasoning loop that ensures:
+        1. No repeated commands
+        2. Graceful error handling
+        3. Adaptive strategy based on results
+        
+        Args:
+            goal: High-level objective for this phase
+            known_intel: Existing knowledge from previous phases
+            max_cycles: Maximum reasoning cycles before fallback
+        
+        Returns:
+            dict with success, findings, actions_taken, reflections
+        """
+        self._phase_state = {
+            "goal": goal,
+            "known_intel": known_intel,
+            "cycle": 0,
+            "actions_taken": [],
+            "findings": [],
+            "errors": [],
+        }
+        
+        self.console.print(Panel(
+            f"[bold]Goal:[/] {goal}\n"
+            f"[bold]Known Intel:[/] {len(known_intel)} items",
+            title=f"[cyan]🧠 {self.agent_name} COGNITIVE CYCLE[/]",
+            border_style="cyan",
+        ))
+        
+        for cycle in range(max_cycles):
+            self._phase_state["cycle"] = cycle + 1
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1: PLAN - What should we do next?
+            # ═══════════════════════════════════════════════════════════════
+            plan = self._cognitive_plan(goal, known_intel)
+            if plan.get("done"):
+                self.log_info(f"[PLAN] Goal achieved at cycle {cycle + 1}")
+                break
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2: SELECT - Choose the single best action
+            # ═══════════════════════════════════════════════════════════════
+            action = self._cognitive_select(plan)
+            if not action:
+                self.log_warning("[SELECT] No valid action selected, finishing")
+                break
+            
+            # Check for command repetition
+            cmd_key = f"{action['tool']}:{action.get('args', [])}"
+            if cmd_key in self._executed_commands:
+                self.log_warning(f"[SELECT] Skipping repeated command: {cmd_key}")
+                continue
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 3: EXECUTE - Run the selected action
+            # ═══════════════════════════════════════════════════════════════
+            result = self._cognitive_execute(action)
+            self._executed_commands.add(cmd_key)
+            self._phase_state["actions_taken"].append({
+                "cycle": cycle + 1,
+                "action": action,
+                "result": result,
+            })
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 4: REFLECT - What did we learn?
+            # ═══════════════════════════════════════════════════════════════
+            reflection = self._cognitive_reflect(action, result)
+            self._reflection_log.append(reflection)
+            
+            # Update known_intel with new findings
+            if reflection.get("new_findings"):
+                for finding in reflection["new_findings"]:
+                    self._phase_state["findings"].append(finding)
+                    known_intel[finding.get("type", "unknown")] = finding.get("data")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 5: ADAPT - Should we continue, change strategy, or finish?
+            # ═══════════════════════════════════════════════════════════════
+            adapt_decision = self._cognitive_adapt(reflection)
+            
+            if adapt_decision == "finish":
+                self.log_info("[ADAPT] Goal achieved or sufficient data collected")
+                break
+            elif adapt_decision == "change_strategy":
+                self.log_info("[ADAPT] Changing strategy based on results")
+                # Strategy change handled in next plan phase
+        
+        return {
+            "agent": self.agent_name,
+            "success": len(self._phase_state["findings"]) > 0,
+            "cycles": self._phase_state["cycle"],
+            "actions_taken": self._phase_state["actions_taken"],
+            "findings": self._phase_state["findings"],
+            "reflections": self._reflection_log,
+        }
+    
+    def _cognitive_plan(self, goal: str, known_intel: dict) -> dict:
+        """
+        PLAN phase: Determine what information is needed and what to do next.
+        """
+        # Check if goal is already achieved
+        if self._is_goal_achieved(goal, known_intel):
+            return {"done": True, "reason": "Goal already achieved with known intel"}
+        
+        # Identify gaps in knowledge
+        gaps = self._identify_knowledge_gaps(goal, known_intel)
+        
+        return {
+            "done": False,
+            "gaps": gaps,
+            "priority_gap": gaps[0] if gaps else None,
+            "known_intel_summary": self._summarize_intel(known_intel),
+        }
+    
+    def _cognitive_select(self, plan: dict) -> dict | None:
+        """
+        SELECT phase: Choose the single most valuable action.
+        """
+        if not plan.get("priority_gap"):
+            return None
+        
+        gap = plan["priority_gap"]
+        
+        # Map gaps to tools
+        tool_mapping = {
+            "ports": ("nmap", ["-sV", "-sC", "-p-", "{target}"]),
+            "services": ("nmap", ["-sV", "-sC", "{target}"]),
+            "vulnerabilities": ("nuclei", ["-u", "{target}", "-severity", "high,critical"]),
+            "web_paths": ("gobuster", ["dir", "-u", "http://{target}", "-w", "/usr/share/wordlists/dirb/common.txt"]),
+            "smb_info": ("enum4linux", ["-a", "{target}"]),
+            "ftp_info": ("nmap", ["-p21", "--script", "ftp-*", "{target}"]),
+        }
+        
+        if gap in tool_mapping:
+            tool, args = tool_mapping[gap]
+            return {"tool": tool, "args": args, "purpose": f"Fill knowledge gap: {gap}"}
+        
+        return None
+    
+    def _cognitive_execute(self, action: dict) -> dict:
+        """
+        EXECUTE phase: Run the selected tool and capture output.
+        """
+        tool = action["tool"]
+        args = action.get("args", [])
+        purpose = action.get("purpose", "")
+        
+        self.console.print(f"[dim]🔧 Executing: {tool} {' '.join(str(a) for a in args)}[/]")
+        
+        try:
+            result = self.tools.use(tool, args=args, purpose=purpose)
+            return {
+                "success": True,
+                "output": result.get("output", str(result)),
+                "exit_code": result.get("exit_code", 0),
+                "duration": result.get("duration", 0),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "output": "",
+            }
+    
+    def _cognitive_reflect(self, action: dict, result: dict) -> dict:
+        """
+        REFLECT phase: Analyze what was learned from the action.
+        """
+        reflection = {
+            "action": action["tool"],
+            "success": result.get("success", False),
+            "new_findings": [],
+            "errors": [],
+        }
+        
+        if not result.get("success"):
+            reflection["errors"].append(result.get("error", "Unknown error"))
+            return reflection
+        
+        output = result.get("output", "")
+        
+        # Extract findings based on tool type
+        tool = action["tool"]
+        if tool == "nmap":
+            ports = self._parse_nmap_ports(output)
+            if ports:
+                reflection["new_findings"].append({"type": "ports", "data": ports})
+        elif tool == "nuclei":
+            vulns = self._parse_nuclei_vulns(output)
+            if vulns:
+                reflection["new_findings"].append({"type": "vulnerabilities", "data": vulns})
+        elif tool == "enum4linux":
+            smb_info = self._parse_enum4linux(output)
+            if smb_info:
+                reflection["new_findings"].append({"type": "smb_info", "data": smb_info})
+        
+        return reflection
+    
+    def _cognitive_adapt(self, reflection: dict) -> str:
+        """
+        ADAPT phase: Decide next action based on reflection.
+        
+        Returns: "continue", "change_strategy", or "finish"
+        """
+        # If we found critical vulnerabilities, might be ready to finish
+        for finding in reflection.get("new_findings", []):
+            if finding.get("type") == "vulnerabilities":
+                return "finish"
+        
+        # If errors occurred, might need to change strategy
+        if reflection.get("errors"):
+            return "change_strategy"
+        
+        # Otherwise continue
+        return "continue"
+    
+    def _is_goal_achieved(self, goal: str, known_intel: dict) -> bool:
+        """Check if goal is already achieved with current intel."""
+        # Override in subclasses for specific goal checking
+        return False
+    
+    def _identify_knowledge_gaps(self, goal: str, known_intel: dict) -> list[str]:
+        """Identify what information is missing to achieve the goal."""
+        gaps = []
+        
+        if "ports" not in known_intel:
+            gaps.append("ports")
+        if "services" not in known_intel:
+            gaps.append("services")
+        if "vulnerabilities" not in known_intel:
+            gaps.append("vulnerabilities")
+        
+        return gaps
+    
+    def _summarize_intel(self, known_intel: dict) -> str:
+        """Create a brief summary of known intelligence."""
+        parts = []
+        for key, value in known_intel.items():
+            if isinstance(value, list):
+                parts.append(f"{key}: {len(value)} items")
+            elif isinstance(value, dict):
+                parts.append(f"{key}: {len(value)} entries")
+            else:
+                parts.append(f"{key}: {value}")
+        return ", ".join(parts) if parts else "No prior intel"
+    
+    def _parse_nmap_ports(self, output: str) -> list[dict]:
+        """Parse nmap output for open ports."""
+        import re
+        ports = []
+        for match in re.finditer(r'(\d+)/tcp\s+open\s+(\S+)\s*(.*)', output):
+            ports.append({
+                "port": int(match.group(1)),
+                "service": match.group(2),
+                "version": match.group(3).strip(),
+            })
+        return ports
+    
+    def _parse_nuclei_vulns(self, output: str) -> list[dict]:
+        """Parse nuclei output for vulnerabilities."""
+        import re
+        vulns = []
+        for line in output.split("\n"):
+            if "[" in line and "]" in line:
+                # Nuclei format: [severity] [template-id] [protocol] url
+                match = re.search(r'\[(\w+)\]\s+\[([^\]]+)\].*?(https?://\S+|\d+\.\d+\.\d+\.\d+)', line)
+                if match:
+                    vulns.append({
+                        "severity": match.group(1),
+                        "template": match.group(2),
+                        "target": match.group(3),
+                    })
+        return vulns
+    
+    def _parse_enum4linux(self, output: str) -> dict:
+        """Parse enum4linux output for SMB info."""
+        info = {"users": [], "shares": [], "groups": []}
+        
+        if "user:" in output.lower():
+            import re
+            for match in re.finditer(r'user:\[([^\]]+)\]', output, re.IGNORECASE):
+                info["users"].append(match.group(1))
+        
+        if "disk" in output.lower() or "share" in output.lower():
+            for match in re.finditer(r'([\w$]+)\s+Disk', output):
+                info["shares"].append(match.group(1))
+        
+        return info
 
     # ══════════════════════════════════════════════════════════════════════════
     # VERBOSE LOGGING HELPERS
