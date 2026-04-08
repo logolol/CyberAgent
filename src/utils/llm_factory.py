@@ -142,6 +142,59 @@ def get_reasoning_llm(task_complexity: str = "medium") -> dict:
     }
 
 
+def get_gemma4_llm(task: Literal["pentest", "reasoning"] = "pentest"):
+    """
+    Return Gemma 4 model for high-accuracy tasks (exploitation, strategic planning).
+    
+    WARNING: Gemma 4 is ~6x slower than qwen2.5:7b on CPU-only inference.
+    Only use when accuracy is critical (e.g., exploit generation, complex reasoning).
+    
+    Args:
+        task: "pentest" for exploitation tasks, "reasoning" for strategic planning
+    
+    Returns:
+        OllamaLLM configured for Gemma 4
+    """
+    from langchain_ollama import OllamaLLM
+
+    cfg = _load_config()
+    base_url = cfg["ollama_base_url"]
+    
+    role_key = f"gemma4_{task}"
+    role_cfg = cfg["models"].get(role_key)
+    
+    if not role_cfg:
+        _log.warning(f"Gemma4 {task} config not found, falling back to default")
+        return get_llm()
+    
+    model = role_cfg["name"]
+    base_model = role_cfg.get("base_model", model)
+    temperature = role_cfg.get("temperature", 0.3)
+    num_ctx = role_cfg.get("num_ctx", 8192)
+    num_predict = role_cfg.get("num_predict", 2048)
+    
+    # Check if tuned model is available, fall back to base
+    if not _ping_model(model, base_url):
+        if _ping_model(base_model, base_url):
+            print(f"[LLMFactory] ⚠ Gemma4 {task} → {base_model} (base fallback)")
+            model = base_model
+        else:
+            print(f"[LLMFactory] ⚠ Gemma4 unavailable, using default model")
+            return get_llm()
+    else:
+        print(f"[LLMFactory] ✓ Gemma4 {task} → {model} (high-accuracy mode)")
+    
+    return OllamaLLM(
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        num_predict=num_predict,
+        keep_alive="30m",  # Shorter keep-alive for big model
+        client_kwargs={"timeout": 600.0},  # 10 min timeout for slow inference
+    )
+
+
 def warm_model(role: str = "default", keep_alive: str = "2h") -> bool:
     """
     Pre-loads the model into Ollama's RAM by sending
