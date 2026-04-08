@@ -264,53 +264,42 @@ class EnumVulnAgent(BaseAgent):
                     self.all_results[f"port_{port_info.get('port', 0)}"] = port_info
 
             # ══════════════════════════════════════════════════════════════
-            # ReAct LOOP: LLM-driven enumeration
+            # COGNITIVE CYCLE: Plan → Execute → Reflect → Adapt
             # ══════════════════════════════════════════════════════════════
-            react_context = {
+            cognitive_context = {
                 "phase": "enumeration",
                 "target": target,
                 "hosts": self.attack_surface,
-                "findings": [],
-                "observations": [],
-                "port_scan_done": port_scan_done,  # COG04: Flag to skip full scan
-                "known_ports": known_ports,  # COG04: Pre-discovered ports
+                "port_scan_done": port_scan_done,
+                "known_ports": known_ports,
             }
             
-            self.log_info("Starting ReAct enumeration loop...")
+            self.log_info("Starting cognitive enumeration cycle...")
             
-            for iteration in range(self.max_iterations):
-                if self._llm_failures >= 3:
-                    self.log_warning("3 LLM failures, switching to deterministic mode")
-                    break
+            try:
+                cog_result = self.cognitive_cycle(
+                    goal="Enumerate services and vulnerabilities on target",
+                    known_intel=cognitive_context,
+                    max_cycles=self.max_iterations
+                )
                 
-                if self.vulnerabilities and len(self.vulnerabilities) >= 5:
-                    self.log_success("Sufficient vulns found, ending ReAct loop")
-                    break
-                
-                task = self._build_enum_task(react_context)
-                
-                try:
-                    react_result = self.react(task=task, context=react_context)
+                if cog_result.get("success"):
+                    # Extract findings from cognitive cycle
+                    for finding in cog_result.get("findings", []):
+                        if finding.get("type") == "vulnerability":
+                            self.vulnerabilities.append(finding.get("data", {}))
+                        elif finding.get("type") == "port":
+                            self.all_results[f"cog_port_{len(self.all_results)}"] = finding.get("data", {})
                     
-                    if react_result.get("success"):
-                        result = react_result.get("result", {})
-                        
-                        # Extract findings from result
-                        if isinstance(result, dict):
-                            if result.get("vulnerabilities"):
-                                self.vulnerabilities.extend(result["vulnerabilities"])
-                            if result.get("ports"):
-                                react_context["findings"].extend(result["ports"])
-                        
-                        react_context["observations"].append(result)
-                        self._llm_failures = 0
-                    else:
-                        self._llm_failures += 1
-                        self.log_warning(f"ReAct iteration {iteration} failed: {react_result.get('error')}")
-                        
-                except Exception as e:
-                    self._llm_failures += 1
-                    self.log_warning(f"ReAct iteration {iteration} exception: {e}")
+                    self._llm_failures = 0
+                    self.log_success(f"Cognitive cycle completed: {cog_result.get('cycles')} cycles, {len(self.vulnerabilities)} vulns")
+                else:
+                    self._llm_failures = cog_result.get("cycles", 0)
+                    self.log_warning("Cognitive cycle did not find vulnerabilities")
+                    
+            except Exception as e:
+                self._llm_failures = 3
+                self.log_warning(f"Cognitive cycle exception: {e}")
 
             # ══════════════════════════════════════════════════════════════
             # DETERMINISTIC FALLBACK: No LLM required
@@ -324,10 +313,10 @@ class EnumVulnAgent(BaseAgent):
                 # Stage 3: single analysis pass over all outputs
                 analysis = self._run_analysis_phase()
             else:
-                # Use ReAct findings for analysis
+                # Use cognitive cycle findings for analysis
                 analysis = {
                     "vulnerabilities": self.vulnerabilities,
-                    "ports": react_context.get("findings", []),
+                    "ports": list(self.all_results.values()),
                 }
 
             # Stage 4: compile + store final findings
@@ -1011,7 +1000,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         from utils.llm_factory import warm_model
         warm_model(role="default", keep_alive="2h")
         
-        raw = self._llm_with_timeout(prompt, timeout=300)
+        # FIX 9: Reduced timeout from 300s to 60s (wave planning)
+        raw = self._llm_with_timeout(prompt, timeout=60)
         decision = self._extract_json_robust(raw)
 
         if not decision or not decision.get("tool_batch"):
@@ -1325,7 +1315,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"mitre_techniques":["T1046"],"expected_findings":"string","risk_level":"high|medium|low|unknown"}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=240)
+        # FIX 9: Reduced timeout from 240s to 60s (planning)
+        raw = self._llm_with_timeout(prompt, timeout=60)
         plan = self._extract_json_robust(raw)
 
         if not plan:
@@ -1462,7 +1453,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_hypotheses":["string"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=240)
+        # FIX 9: Reduced timeout from 240s to 60s (wave planning)
+        raw = self._llm_with_timeout(prompt, timeout=60)
         decision = self._extract_json_robust(raw) if raw else None
         if not decision:
             fallback_specs = self._fallback_tool_batch()
@@ -1755,7 +1747,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             except Exception as e:
                 self.log_warning(f"Deterministic tool resolution failed for {best_tool}: {e}")
 
-        raw = self._llm_with_timeout(arg_prompt, timeout=240)
+        # FIX 9: Reduced timeout from 240s to 45s (arg resolution)
+        raw = self._llm_with_timeout(arg_prompt, timeout=45)
         args = self._extract_args_from_llm(raw, target)
 
         spec["_resolved_args"] = args
@@ -1835,7 +1828,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             '"new_attack_vectors":["string"],"open_questions":["string"],"mitre_techniques_observed":["T1046"]}'
         )
 
-        raw = self._llm_with_timeout(prompt, timeout=240)
+        # FIX 9: Reduced timeout from 240s to 60s (analysis)
+        raw = self._llm_with_timeout(prompt, timeout=60)
         analysis = self._extract_json_robust(raw)
 
         if not analysis:
@@ -1915,7 +1909,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 '"remediation":"string"}'
             )
 
-            raw = self._llm_with_timeout(classify_prompt, timeout=240)
+            # FIX 9: Reduced timeout from 240s to 45s (vuln classification)
+            raw = self._llm_with_timeout(classify_prompt, timeout=45)
             vuln = self._extract_json_robust(raw)
 
             if not vuln:
@@ -2146,11 +2141,12 @@ Use only evidence above — do not invent:
             return None
 
         # TRY LLM for exploitability reasoning with timeout
-        self.log_info("Attempting LLM exploitability reasoning (90s timeout)...")
+        # FIX 9: Reduced timeout to 45s
+        self.log_info("Attempting LLM exploitability reasoning (45s timeout)...")
         batch_result = None
         
         try:
-            raw = self._llm_with_timeout(prompt, timeout=180)  # Increased from 90s
+            raw = self._llm_with_timeout(prompt, timeout=45)  # FIX 9: Reduced from 180s
             if raw and raw.strip():
                 batch_result = _extract_json_array(raw)
                 if batch_result:
@@ -2385,8 +2381,9 @@ Return JSON:
 "attack_sequence":["step1","step2"],"confidence":"high|medium|low"}}"""
             
             try:
-                self.log_info("Attempting LLM attack path analysis (180s timeout)...")
-                raw = self._llm_with_timeout(attack_prompt, timeout=180)  # Increased from 60s
+                # FIX 9: Reduced timeout from 180s to 60s (attack path)
+                self.log_info("Attempting LLM attack path analysis (60s timeout)...")
+                raw = self._llm_with_timeout(attack_prompt, timeout=60)
                 if raw:
                     llm_attack = self._extract_json_robust(raw)
                     if llm_attack and isinstance(llm_attack, dict) and llm_attack.get("critical_path"):
@@ -2692,13 +2689,13 @@ Return JSON:
         return found
 
     def _summarize_batch_for_llm(self, results: dict[str, str]) -> str:
-        """Compact tool output summary (max 1500 chars)."""
+        """Compact tool output summary (max 500 chars) - FIX 9."""
         blocks: list[str] = []
         for key, output in results.items():
-            preview = (output or "").replace("\n", " ")[:300]
+            preview = (output or "").replace("\n", " ")[:150]  # Reduced from 300
             blocks.append(f"{key}:\n{preview}\n")
         summary = "\n".join(blocks)
-        return summary[:1500]
+        return summary[:500]  # FIX 9: Reduced from 1500
 
     def _extract_versions_from_all_outputs(self) -> dict[str, str]:
         """Convenience wrapper to extract versions from accumulated outputs."""

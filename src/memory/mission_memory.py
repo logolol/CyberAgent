@@ -211,13 +211,13 @@ class MissionMemory:
         self.save_state()
 
     def add_shell(self, ip: str, shell_type: str, user: str, shell_path: str = "", 
-                  port: int = 0, lport: int = 0):
+                  port: int = 0, lport: int = 0, verified: bool = False):
         valid_types = {
             "shell", "root_shell", "meterpreter", "metasploit", "webshell",
             "reverse_shell", "bind_shell", "bindshell",
             "anon_ftp", "ftp_login", "rsh", "rexec", "telnet",
             "rce", "session", "unknown",
-            "bash", "sh", "reverse", "bind"  # Legacy compat
+            "bash", "sh", "reverse", "bind", "ssh", "ssh_credential"  # Extended types
         }
         shell_type = str(shell_type).strip().lower()
         if shell_type not in valid_types:
@@ -228,19 +228,22 @@ class MissionMemory:
         if not user:
             user = "unknown"
             _log.warning("add_shell: empty user — using 'unknown'")
-        _log.info(f"Shell obtained: {user}@{ip} via {shell_type} (port={port}, lport={lport})")
+        _log.info(f"Shell obtained: {user}@{ip} via {shell_type} (port={port}, lport={lport}, verified={verified})")
 
         self._ensure_host(ip)
         shell_entry = {
             "type": shell_type, 
             "user": user, 
             "shell_path": shell_path,
+            "verified": verified,  # FIX 5: Track verification status
         }
         # Store port info if provided
         if port:
             shell_entry["port"] = int(port)
         if lport:
             shell_entry["lport"] = int(lport)
+        # Store IP for cross-reference
+        shell_entry["ip"] = ip
         self._state["hosts"][ip]["shells"].append(shell_entry)
         self.save_state()
 
