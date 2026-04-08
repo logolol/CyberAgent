@@ -26,26 +26,25 @@ models:
     name: nomic-embed-text
     use_for: [chromadb_rag]
 
-  # ── Gemma 4 models (accuracy > speed) ──
-  # Use when high accuracy is needed, e.g., exploit generation
-  # WARNING: ~6 minutes per response on CPU-only
+  # ── Gemma 4 models (optional high-accuracy mode) ──
+  # CPU-only note: still much slower than qwen2.5:7b in this environment
   gemma4_pentest:
-    name: cyberagent-gemma4:pentest
-    base_model: gemma4:e4b
+    name: cyberagent-gemma4-e2b:pentest
+    base_model: gemma4:e2b
     use_for: [exploitation, exploit_research, high_accuracy]
-    temperature: 0.3
-    num_ctx: 8192
-    num_predict: 2048
-    description: "Gemma4 E4B with pentest prompt — accurate but slow"
+    temperature: 0.25
+    num_ctx: 4096
+    num_predict: 1024
+    description: "Gemma4 E2B with pentest prompt — optional high-accuracy mode"
   
   gemma4_reasoning:
-    name: cyberagent-gemma4:reasoning
-    base_model: gemma4:e4b
+    name: cyberagent-gemma4-e2b:reasoning
+    base_model: gemma4:e2b
     use_for: [strategic_planning, complex_reasoning]
     temperature: 0.1
-    num_ctx: 16384
-    num_predict: 4096
-    description: "Gemma4 E4B for strategic reasoning — thinking mode enabled"
+    num_ctx: 4096
+    num_predict: 1024
+    description: "Gemma4 E2B for strategic reasoning — optional and slower than default"
 
   # ── Base models (fallback if tuned models fail) ──
   default_base:

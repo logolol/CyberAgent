@@ -146,8 +146,8 @@ def get_gemma4_llm(task: Literal["pentest", "reasoning"] = "pentest"):
     """
     Return Gemma 4 model for high-accuracy tasks (exploitation, strategic planning).
     
-    WARNING: Gemma 4 is ~6x slower than qwen2.5:7b on CPU-only inference.
-    Only use when accuracy is critical (e.g., exploit generation, complex reasoning).
+    WARNING: Gemma 4 is slower than qwen2.5:7b on CPU-only inference.
+    Use as optional high-accuracy mode, not as the default runtime model.
     
     Args:
         task: "pentest" for exploitation tasks, "reasoning" for strategic planning
@@ -170,8 +170,8 @@ def get_gemma4_llm(task: Literal["pentest", "reasoning"] = "pentest"):
     model = role_cfg["name"]
     base_model = role_cfg.get("base_model", model)
     temperature = role_cfg.get("temperature", 0.3)
-    num_ctx = role_cfg.get("num_ctx", 8192)
-    num_predict = role_cfg.get("num_predict", 2048)
+    num_ctx = role_cfg.get("num_ctx", 4096)
+    num_predict = role_cfg.get("num_predict", 1024)
     
     # Check if tuned model is available, fall back to base
     if not _ping_model(model, base_url):
@@ -190,8 +190,8 @@ def get_gemma4_llm(task: Literal["pentest", "reasoning"] = "pentest"):
         temperature=temperature,
         num_ctx=num_ctx,
         num_predict=num_predict,
-        keep_alive="30m",  # Shorter keep-alive for big model
-        client_kwargs={"timeout": 600.0},  # 10 min timeout for slow inference
+        keep_alive="15m",
+        client_kwargs={"timeout": 180.0},
     )
 
 
