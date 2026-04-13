@@ -2,6 +2,15 @@
 
 **Last Updated:** 2026-04-06 (Day 18 - Phase 3)
 
+## 2026-04-13: PentestGPT Methodology Folder Documentation + Status Clarification
+
+An explicit documentation pass was added for `testing/pentestgpt-methodology` to make scope and current behavior clear for demo/reporting:
+
+- `README.md` now includes a detailed methodology folder status section and local run instructions.
+- `COMUNIK_METHODOLOGY.md` now documents the full exploitation pipeline layers (static DB, ExploitDB CSV, dynamic MSF search, option solver), operational boundaries, and reproducible run command.
+- Clarified that exploitation flow is dynamic and multi-service aware, but not universal-guaranteed for every service/version/CVE.
+- Clarified separation between verified shell outcomes and non-shell access findings in reporting semantics.
+
 ## Current Status: ✅ 30+ EXPLOITATION FIXES COMPLETE — HTTP PORT VALIDATION ADDED
 
 ### Just Completed (Day 18 Phase 3 — HTTP Shell Validation)

@@ -1,5 +1,30 @@
 # Progress — Multi-Agent PentestAI
 
+## ✅ Completed — 2026-04-13 (PentestGPT Methodology Documentation Pass)
+
+Scope: `testing/pentestgpt-methodology` (isolated branch workflow docs)
+
+### Documentation updates shipped
+
+- `testing/pentestgpt-methodology/README.md`
+  - Added detailed "Methodology Folder Status" section.
+  - Documented current dynamic exploitation architecture and practical boundaries.
+  - Added explicit local venv run path for reproducible demos.
+
+- `testing/pentestgpt-methodology/COMUNIK_METHODOLOGY.md`
+  - Added step-by-step exploitation workflow internals.
+  - Added "Covered vs Not Fully Covered Yet" section for transparent capability framing.
+  - Added operational guidance command block for local execution.
+
+- `memory-bank/activeContext.md`
+  - Added current-state note summarizing scope and behavior clarifications.
+
+### Impact
+
+- Reduces ambiguity during jury/demo presentation.
+- Aligns folder documentation with actual runtime behavior observed in logs.
+- Makes clear distinction between dynamic exploit orchestration and universal exploit guarantee.
+
 ## ✅ Completed — Day 18 Phase 3 (HTTP SHELL VALIDATION)
 
 Sprint: S18-SHELL-VALIDATION
@@ -1280,4 +1305,3 @@ Commits: `31787ea`, `abde0d8`, `1927484`, `1745d02`
 - File upload: ⏳
 
 ---
-
