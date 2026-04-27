@@ -25,6 +25,19 @@ ollama create cyberagent-pentest:14b -f training/Modelfile.pentest
 
 ---
 
+### `Modelfile.pentest-coder`
+Ollama Modelfile for `cyberagent-pentest-coder:7b`.
+
+**Base model**: `qwen2.5-coder:7b-instruct-q4_K_S`  
+**Purpose**: Unified all-phase model with stronger exploitation action reasoning and stricter command/JSON discipline.
+
+**Register/update with Ollama**:
+```bash
+ollama create cyberagent-pentest-coder:7b -f training/Modelfile.pentest-coder
+```
+
+---
+
 ### `Modelfile.reasoning`
 Ollama Modelfile for `cyberagent-reasoning:8b`.
 
@@ -111,6 +124,7 @@ cd ~/CyberAgent
 # Re-register models
 ollama create cyberagent-pentest:14b -f training/Modelfile.pentest
 ollama create cyberagent-reasoning:8b -f training/Modelfile.reasoning
+ollama create cyberagent-pentest-coder:7b -f training/Modelfile.pentest-coder
 
 # Verify registration
 ollama list | grep cyberagent

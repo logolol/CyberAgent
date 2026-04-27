@@ -41,8 +41,8 @@ except Exception as e:
     models = []
 
 # ── 2. Model pings ───────────────────────────────────────────────────
-for env_key, label in [("DEFAULT_MODEL","qwen2.5 default"),
-                        ("REASONING_MODEL","deepseek reasoning")]:
+for env_key, label in [("DEFAULT_MODEL","default model"),
+                        ("REASONING_MODEL","reasoning model")]:
     model = os.environ.get(env_key,"")
     if not model:
         check(label, "Not set in .env", False); continue

@@ -15,6 +15,10 @@ import signal
 import sys
 from pathlib import Path
 
+# Force unbuffered output for real-time display
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 from rich.console import Console
 from rich.panel import Panel
 
@@ -25,7 +29,7 @@ from memory.mission_memory import MissionMemory
 from agents.orchestrator_agent import OrchestratorAgent
 from utils.llm_factory import warm_model
 
-console = Console()
+console = Console(force_terminal=True)
 
 
 def print_banner():

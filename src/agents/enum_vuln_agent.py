@@ -224,6 +224,8 @@ class EnumVulnAgent(BaseAgent):
 
     def run(self, target: str, briefing: dict = {}) -> dict:
         self.target = target
+        # Keep parity with agents that expose resolved_ip for placeholder rendering
+        self.resolved_ip = self._normalize_host_ip(target)
         self.briefing = briefing or {}
         self.recon_findings = {}
         self.attack_surface = {}
@@ -238,7 +240,7 @@ class EnumVulnAgent(BaseAgent):
             f"[bold cyan]🔎 EnumVulnAgent — Active Enum + Vuln Detection[/]\n"
             f"[white]Target:[/] [cyan]{target}[/]\n"
             f"[white]Model:[/] Qwen2.5:7b | [white]RAG:[/] 147K docs\n"
-            f"[white]Strategy:[/] ReAct Loop → Deterministic Fallback",
+            f"[white]Strategy:[/] LLM-first dynamic enumeration",
             border_style="cyan",
         ))
 
@@ -263,61 +265,11 @@ class EnumVulnAgent(BaseAgent):
                 for port_info in known_ports:
                     self.all_results[f"port_{port_info.get('port', 0)}"] = port_info
 
-            # ══════════════════════════════════════════════════════════════
-            # COGNITIVE CYCLE: Plan → Execute → Reflect → Adapt
-            # ══════════════════════════════════════════════════════════════
-            cognitive_context = {
-                "phase": "enumeration",
-                "target": target,
-                "hosts": self.attack_surface,
-                "port_scan_done": port_scan_done,
-                "known_ports": known_ports,
-            }
-            
-            self.log_info("Starting cognitive enumeration cycle...")
-            
-            try:
-                cog_result = self.cognitive_cycle(
-                    goal="Enumerate services and vulnerabilities on target",
-                    known_intel=cognitive_context,
-                    max_cycles=self.max_iterations
-                )
-                
-                if cog_result.get("success"):
-                    # Extract findings from cognitive cycle
-                    for finding in cog_result.get("findings", []):
-                        if finding.get("type") == "vulnerability":
-                            self.vulnerabilities.append(finding.get("data", {}))
-                        elif finding.get("type") == "port":
-                            self.all_results[f"cog_port_{len(self.all_results)}"] = finding.get("data", {})
-                    
-                    self._llm_failures = 0
-                    self.log_success(f"Cognitive cycle completed: {cog_result.get('cycles')} cycles, {len(self.vulnerabilities)} vulns")
-                else:
-                    self._llm_failures = cog_result.get("cycles", 0)
-                    self.log_warning("Cognitive cycle did not find vulnerabilities")
-                    
-            except Exception as e:
-                self._llm_failures = 3
-                self.log_warning(f"Cognitive cycle exception: {e}")
-
-            # ══════════════════════════════════════════════════════════════
-            # DETERMINISTIC FALLBACK: No LLM required
-            # ══════════════════════════════════════════════════════════════
-            if not self.vulnerabilities or self._llm_failures >= 3:
-                self.log_info("Fallback: Running deterministic enumeration...")
-                
-                # Stage 2: gather raw evidence through deterministic tool waves
-                self._run_gather_phase()
-
-                # Stage 3: single analysis pass over all outputs
-                analysis = self._run_analysis_phase()
-            else:
-                # Use cognitive cycle findings for analysis
-                analysis = {
-                    "vulnerabilities": self.vulnerabilities,
-                    "ports": list(self.all_results.values()),
-                }
+            # LLM-first autonomous loop (no deterministic chain)
+            initial_plan = self._plan_initial_attack()
+            self._enumeration_loop(initial_plan)
+            self._llm_failures = 0 if self.all_results else 1
+            analysis = self._run_analysis_phase()
 
             # Stage 4: compile + store final findings
             findings = self._compile_vuln_report(analysis)
@@ -1047,10 +999,17 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         Build wave intelligence summary from tool output — no LLM.
         Pure extraction: ports, services, versions, CVEs found.
         Fast and always works regardless of model availability.
+        
+        CRITICAL: Also directly persists ports and vulns to MissionMemory!
         """
         all_output = "\n".join(str(v) for v in batch_results.values())
         
-        # Extract what was actually found
+        # DEBUG: Log what we're receiving
+        self.log_info(f"🔍 Wave {wave_num}: Processing {len(batch_results)} tool outputs, total {len(all_output)} chars")
+        for tool_key, output in list(batch_results.items())[:3]:
+            self.log_info(f"  Tool: {tool_key}, output: {len(output)} chars, preview: {output[:100].replace(chr(10), ' ')}")
+        
+        # Extract what was actually found from nmap output
         ports_found = re.findall(
             r'(\d+)/tcp\s+open\s+(\S+)', all_output
         )
@@ -1064,6 +1023,63 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             r'\[([A-Za-z0-9_\-]+)\]\s*\[[a-z]+\]\s*\[(critical|high)\]',
             re.sub(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', all_output)
         )
+        
+        # DEBUG: Log what was extracted
+        self.log_info(f"🔍 Extracted: {len(ports_found)} ports, {len(cves_found)} CVEs, {len(nuclei_found)} nuclei hits")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # CRITICAL FIX: Directly persist extracted ports to MissionMemory
+        # The LLM analysis may not return data in expected format
+        # ═══════════════════════════════════════════════════════════════════════
+        resolved_ip = self._normalize_host_ip(self.target)
+        for port_tuple in ports_found:
+            try:
+                port_num = int(port_tuple[0])
+                service = str(port_tuple[1])
+                version = versions_found.get(service, "")
+                self.memory.add_port(
+                    ip=resolved_ip,
+                    port=port_num,
+                    service=service,
+                    version=version,
+                    banner="",
+                )
+                self.log_info(f"📍 Port persisted: {port_num}/{service} v{version}")
+            except Exception as e:
+                self.log_warning(f"Failed to persist port {port_tuple}: {e}")
+        
+        # Persist nuclei CVE findings as vulnerabilities
+        for nuclei_match in nuclei_found:
+            cve_id = nuclei_match[0]
+            severity = nuclei_match[1]
+            try:
+                self.memory.add_vulnerability(
+                    ip=resolved_ip,
+                    cve=cve_id,
+                    cvss=9.8 if severity == "critical" else 7.5,
+                    description=f"Nuclei detected {cve_id} ({severity})",
+                    exploitable=True,
+                )
+                self.log_info(f"🔴 Vuln persisted: {cve_id} ({severity})")
+            except Exception as e:
+                self.log_warning(f"Failed to persist nuclei vuln {cve_id}: {e}")
+        
+        # Persist CVEs found in any tool output
+        for cve_id in set(cves_found):
+            try:
+                # Check if already added
+                existing = [v.get("cve") for v in self.vulnerabilities]
+                if cve_id.upper() not in [str(c).upper() for c in existing]:
+                    self.memory.add_vulnerability(
+                        ip=resolved_ip,
+                        cve=cve_id,
+                        cvss=7.0,  # Default high for detected CVEs
+                        description=f"CVE detected in tool output: {cve_id}",
+                        exploitable=True,
+                    )
+                    self.log_info(f"🔴 CVE persisted: {cve_id}")
+            except Exception as e:
+                self.log_warning(f"Failed to persist CVE {cve_id}: {e}")
         
         summary = {
             "wave": wave_num,
@@ -1083,12 +1099,6 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             "EnumVulnAgent",
             f"wave_{wave_num}_intelligence",
             str(summary.get("next_wave_priority",""))[:200]
-        )
-
-        self.memory.log_action(
-            "EnumVulnAgent",
-            f"wave_{wave_num}_intelligence",
-            str(summary.get("next_wave_priority", ""))[:200],
         )
 
     def _format_intelligence_history(self) -> str:
@@ -1457,9 +1467,10 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         raw = self._llm_with_timeout(prompt, timeout=60)
         decision = self._extract_json_robust(raw) if raw else None
         if not decision:
-            fallback_specs = self._fallback_tool_batch()
-            if fallback_specs:
-                return fallback_specs, "Heuristic fallback", False
+            if self.allow_deterministic_fallback:
+                fallback_specs = self._fallback_tool_batch()
+                if fallback_specs:
+                    return fallback_specs, "Heuristic fallback", False
             return [], "LLM unavailable and no fallback actions", True
 
         done = bool(decision.get("done", False))
@@ -1492,8 +1503,10 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             return [], reasoning, True
 
         if not normalized_tools:
-            fallback_specs = self._fallback_tool_batch()
-            return fallback_specs, reasoning or "No tools selected", False
+            if self.allow_deterministic_fallback:
+                fallback_specs = self._fallback_tool_batch()
+                return fallback_specs, reasoning or "No tools selected", False
+            return [], reasoning or "No tools selected by LLM", True
 
         priority_weight = {"high": 0, "medium": 1, "low": 2}
         normalized_tools.sort(key=lambda s: priority_weight.get(s.get("priority", "medium"), 1))
@@ -1505,7 +1518,9 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                 self.log_warning(f"Spec resolution failed for '{spec.get('purpose', 'unknown')}': {e}")
 
         if not resolved_specs:
-            return self._fallback_tool_batch(), reasoning or "Resolution failed", False
+            if self.allow_deterministic_fallback:
+                return self._fallback_tool_batch(), reasoning or "Resolution failed", False
+            return [], reasoning or "LLM-selected tools could not be resolved", True
 
         return resolved_specs, reasoning, False
 
@@ -1578,7 +1593,16 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         if not os.access(tool_path, os.X_OK):
             return tool_name, f"[TOOL_NOT_EXECUTABLE: {tool_name}]"
 
-        args = [str(a) for a in (resolved_args or [self.target])]
+        target_value = str(getattr(self, "target", "") or "")
+        ip_value = str(getattr(self, "resolved_ip", "") or target_value)
+        args = [
+            str(a)
+            .replace("{target}", target_value)
+            .replace("{ip}", ip_value)
+            .replace("TARGET", target_value)
+            .replace("IP_ADDR", ip_value)
+            for a in (resolved_args or [self.target])
+        ]
         
         # VERBOSE: Log tool call before execution
         self._verbose_tool_call(tool_name, args)
@@ -1614,6 +1638,8 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         purpose = str(spec.get("purpose", "")).strip()
         approach = str(spec.get("approach", "")).strip()
         target = str(spec.get("target", self.target)).strip() or self.target
+        if target.lower() in ("ip", "target", "target_ip", "<target_ip>", "{target}", "{ip}"):
+            target = self.target
 
         best_tool = str(spec.get("tool_hint", "")).strip().split()[0]
         try:
@@ -1669,7 +1695,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         
         # Known tools: deterministic args, no LLM needed
         # This saves 30s × n_tools per wave
-        def _nmap_args_with_evasion(target: str, port: str | None = None) -> list[str]:
+        def _nmap_args_with_evasion(target: str, port: str | None = None, **_) -> list[str]:
             """Build nmap args with evasion profile from MissionMemory."""
             base_args = (
                 [target, "-sV", "-sC", "-p", str(port)]
@@ -1703,18 +1729,62 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             # Default: -T4 timing
             base_args.append("-T4")
             return base_args
-        
+        def _web_brute_args_with_rag(target: str, tool: str = "gobuster", purpose: str = "", **_) -> list[str]:
+            """
+            P2-2: Adaptive wordlists.
+            Queries RAG for service-specific endpoints and combines them with a standard list.
+            """
+            import tempfile
+            import os
+            
+            # Use RAG to find paths
+            custom_paths = set()
+            try:
+                # Look for service/tech name in purpose
+                tech_match = re.search(r'(wordpress|joomla|drupal|apache|tomcat|nginx|iis|jenkins|jira)', purpose, re.IGNORECASE)
+                tech = tech_match.group(1).lower() if tech_match else "web"
+                
+                hits = self.chroma.get_rag_context(f"{tech} common paths endpoints default directories", collections=["hacktricks", "payloads"], n=3)
+                for hit in hits:
+                    text = hit.get("text", "")
+                    # Extract anything that looks like a path (starts with /)
+                    for match in re.finditer(r'(?:^|\s)(/[a-zA-Z0-9_.-]+/?)(?:\s|$)', text):
+                        path = match.group(1).strip()
+                        if len(path) > 1: # avoid just '/'
+                            custom_paths.add(path[1:] if path.startswith('/') else path)
+            except Exception as e:
+                self.log_warning(f"RAG wordlist generation failed: {e}")
+                
+            # Create a combined temporary wordlist
+            wordlist_path = "/usr/share/wordlists/dirb/common.txt"
+            if custom_paths:
+                try:
+                    fd, temp_path = tempfile.mkstemp(prefix="ca_wordlist_", suffix=".txt")
+                    with os.fdopen(fd, 'w') as f:
+                        for p in custom_paths:
+                            f.write(f"{p}\n")
+                        # Include standard dirb common list if it exists
+                        if os.path.exists(wordlist_path):
+                            with open(wordlist_path, 'r', errors='ignore') as base:
+                                f.write(base.read())
+                    wordlist_path = temp_path
+                    self.log_info(f"[WORDLIST] Generated adaptive wordlist with {len(custom_paths)} RAG entries: {temp_path}")
+                except Exception as e:
+                    self.log_warning(f"Failed to create temp wordlist: {e}")
+            
+            if tool == "gobuster":
+                return ["dir", "-u", f"http://{target}", "-w", wordlist_path, "-t", "20", "-q"]
+            else: # ffuf
+                return ["-u", f"http://{target}/FUZZ", "-w", wordlist_path, "-t", "20", "-s"]
+
         DETERMINISTIC_TOOLS = {
             "nmap": _nmap_args_with_evasion,
             "enum4linux": lambda target, **_: ["-a", target],
             "smbclient":  lambda target, **_: ["-L", f"//{target}/", "-N"],
             "smbmap":     lambda target, **_: ["-H", target],
             "nikto":      lambda target, **_: ["-h", f"http://{target}", "-Tuning", "13"],
-            "gobuster":   lambda target, **_: [
-                "dir", "-u", f"http://{target}",
-                "-w", "/usr/share/wordlists/dirb/common.txt",
-                "-t", "20", "-q"
-            ],
+            "gobuster":   lambda target, purpose="", **_: _web_brute_args_with_rag(target, "gobuster", purpose),
+            "ffuf":       lambda target, purpose="", **_: _web_brute_args_with_rag(target, "ffuf", purpose),
             "hydra":      lambda target, **_: [
                 "-L", "/usr/share/wordlists/metasploit/unix_users.txt",
                 "-P", "/usr/share/wordlists/metasploit/unix_passwords.txt",
@@ -1733,7 +1803,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
         if best_tool in DETERMINISTIC_TOOLS:
             try:
-                kwargs = {"target": target}
+                kwargs = {"target": target, "purpose": purpose}
                 if port_hint:
                     kwargs["port"] = port_hint
                 args = DETERMINISTIC_TOOLS[best_tool](**kwargs)
@@ -3507,4 +3577,3 @@ Return JSON:
 
         self.log_warning(f"JSON extraction failed from: {text[:200]!r}")
         return None
-

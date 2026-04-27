@@ -30,6 +30,10 @@ if str(_SRC) not in sys.path:
 
 from agents.base_agent import BaseAgent
 from memory.mission_memory import MissionMemory
+try:
+    from utils.phase_budget import PhaseBudget
+except ImportError:
+    PhaseBudget = None  # graceful degradation if module not yet deployed
 
 console = Console()
 
@@ -104,31 +108,39 @@ class OrchestratorAgent(BaseAgent):
 
     # Ordered attack chain — phases run in this sequence
     ATTACK_CHAIN = [
+        "firewall",
         "recon",
         "enumeration",
         "exploitation",
         "privesc",
         "postexploit",
+        "mitigation",
         "reporting",
     ]
 
     # Static phase gates: (description, result_field_to_check, minimum_value)
+    # Static phase gates: (description, result_field_to_check, minimum_value)
     PHASE_GATES: dict[str, tuple] = {
+        "firewall":     ("detects WAF/IPS and builds evasion profile", None, None),
+        "recon":        ("always runs after firewall",   None,                None),
         "enumeration":  ("recon found live hosts",       "hosts_found",       1),
         "exploitation": ("enum found exploitable OR high/critical vulns", "exploitable_vulns", 1),
         "privesc":      ("exploitation got a shell",     "shells_obtained",   1),
         "postexploit":  ("privesc got elevated access",  "root_obtained",     True),
+        "mitigation":   ("always runs to provide playbooks", None,            None),
         "reporting":    ("always runs",                  None,                None),
     }
 
     # Map ATTACK_CHAIN phase names → MissionMemory.update_phase() values
     _PHASE_MAP = {
+        "firewall":    "firewall",
         "recon":       "recon",
         "enumeration": "enum",
         "vuln_scan":   "vuln",
         "exploitation":"exploit",
         "privesc":     "privesc",
         "postexploit": "postexploit",
+        "mitigation":  "mitigation",
         "reporting":   "report",
     }
 
@@ -500,7 +512,6 @@ class OrchestratorAgent(BaseAgent):
                     ],
                     options=params["options"],
                 )
-
             # Avoid context-manager shutdown wait on timeout; otherwise a stuck
             # worker can block phase progression even after future timeout.
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -509,10 +520,9 @@ class OrchestratorAgent(BaseAgent):
                 resp = future.result(timeout=180)
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
-
             raw = resp["message"]["content"]
         except concurrent.futures.TimeoutError:
-            self.log_error("Direct LLM call timed out after 180s")
+            self.log_error("Direct LLM call timed out after 90s")
             return {"error": "llm_timeout", "raw": ""}
         except Exception as e:
             self.log_error(f"Direct LLM call failed: {e}")
@@ -693,6 +703,20 @@ class OrchestratorAgent(BaseAgent):
         except Exception:
             return "deepseek-r1:8b-llama-distill-q4_K_M"
 
+    @staticmethod
+    def _load_runtime_models() -> tuple[str, str]:
+        """Read configured default/reasoning runtime model names from config."""
+        try:
+            import yaml
+            cfg_path = Path(__file__).parent.parent.parent / "config" / "models.yaml"
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            default_model = cfg["models"]["default"]["name"]
+            reasoning_model = cfg["models"]["reasoning"]["name"]
+            return str(default_model), str(reasoning_model)
+        except Exception:
+            return "qwen2.5-coder:7b-instruct-q4_K_S", "qwen2.5-coder:7b-instruct-q4_K_S"
+
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def run(self, target: str, phase: str = "full") -> dict:
@@ -709,6 +733,7 @@ class OrchestratorAgent(BaseAgent):
         # ── STEP 1: Mission banner + intelligence status ──────────────────────
         mcp = self._get_mcp()
         mcp_status = mcp.status() if mcp else {"mcp_available": False}
+        default_model, reasoning_model = self._load_runtime_models()
         mcp_label = (
             "[green]✓ Connected[/]" if mcp_status.get("mcp_available")
             else "[yellow]✗ Offline → ChromaDB fallback[/]"
@@ -716,7 +741,7 @@ class OrchestratorAgent(BaseAgent):
         self.console.print(Panel.fit(
             f"[bold white]🎯  Target  :[/] [cyan]{target}[/]\n"
             f"[bold white]   Mission :[/] [cyan]{self.memory.mission_id}[/]\n"
-            f"[bold white]   Models  :[/] cyberagent-pentest:7b + cyberagent-reasoning:8b\n"
+            f"[bold white]   Models  :[/] {default_model} + {reasoning_model}\n"
             f"[bold white]   RAG     :[/] 147,029 docs (15 collections) | Tools: 4,309+\n"
             f"[bold white]   MCP     :[/] {mcp_label}\n"
             f"[bold white]   Phase   :[/] [yellow]{phase}[/]",
@@ -726,14 +751,26 @@ class OrchestratorAgent(BaseAgent):
 
         self.memory.log_action("Orchestrator", "mission_start", f"target={target} phase={phase}")
 
-        # ── STEP 2: Initial planning (deterministic, non-blocking) ───────────
-        planning_result = {
-            "target_type": "ip",
-            "initial_hypothesis": "default credentials or misconfigurations",
-            "recon_priorities": ["ports", "services"],
-            "estimated_complexity": "medium",
-            "notes": f"Planning for {target}",
-        }
+        # ── STEP 2: Initial planning (LLM-first) ─────────────────────────────
+        planning_prompt = f"""Target: {target}
+Produce initial pentest mission planning JSON.
+Return JSON only:
+{{
+  "target_type": "ip|domain|internal",
+  "initial_hypothesis": "short string",
+  "recon_priorities": ["ports","services","exposed_http"],
+  "estimated_complexity": "low|medium|high",
+  "notes": "short operator guidance"
+}}"""
+        planning_result = self._direct_llm(planning_prompt, task_complexity="low")
+        if not isinstance(planning_result, dict) or planning_result.get("error"):
+            planning_result = {
+                "target_type": "ip",
+                "initial_hypothesis": "default credentials or misconfigurations",
+                "recon_priorities": ["ports", "services"],
+                "estimated_complexity": "medium",
+                "notes": f"Planning for {target}",
+            }
         self.memory.log_action("Orchestrator", "initial_planning", str(planning_result))
 
         # ── STEP 2.5: Firewall Detection (optional, runs before recon) ─────────
@@ -742,52 +779,21 @@ class OrchestratorAgent(BaseAgent):
         self._run_firewall_detection(target)
 
         # ══════════════════════════════════════════════════════════════════════
-        # LLM FAILURE TRACKING: Switch to deterministic mode after 3 failures
+        # LLM FAILURE TRACKING (monitor-only; no deterministic mode switching)
         # ══════════════════════════════════════════════════════════════════════
         llm_failure_count = 0
-        MAX_LLM_FAILURES = 3
-        use_deterministic = False
 
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
         phases_to_run = self._get_phases_to_run(phase)
 
         for phase_name in phases_to_run:
             self.current_phase = phase_name
-            
-            # Check if we should switch to deterministic mode
-            if llm_failure_count >= MAX_LLM_FAILURES and not use_deterministic:
-                self.log_warning(f"⚠️  {llm_failure_count} LLM failures detected — switching to DeterministicPentest")
-                use_deterministic = True
-                
-                try:
-                    from agents.deterministic_fallback import DeterministicPentest
-                    dp = DeterministicPentest(
-                        mission_memory=self.memory,
-                        chroma_manager=self.chroma,
-                    )
-                    deterministic_result = dp.run(target)
-                    self.memory.log_action("Orchestrator", "deterministic_fallback", 
-                                          f"Switched to deterministic mode after {llm_failure_count} LLM failures")
-                    
-                    # Merge deterministic results into phase_results
-                    self.phase_results["deterministic"] = deterministic_result
-                    
-                    # Skip remaining phases if deterministic mode succeeded
-                    if deterministic_result.get("success"):
-                        self.console.print(Panel(
-                            "[bold green]✅ DeterministicPentest completed successfully[/]\n"
-                            f"Shells: {len(deterministic_result.get('result', {}).get('shells', []))}",
-                            title="[green]DETERMINISTIC MODE[/]",
-                            border_style="green",
-                        ))
-                        break
-                except Exception as e:
-                    self.log_error(f"DeterministicPentest failed: {e}")
 
             self.console.print(Panel(
                 f"[bold cyan]▶  PHASE: {phase_name.upper()}[/]",
                 border_style="blue",
             ))
+            import sys; sys.stdout.flush(); sys.stderr.flush()
 
             # Phase gate check
             gate_passed, gate_reason = self._check_phase_gate(phase_name)
@@ -797,7 +803,18 @@ class OrchestratorAgent(BaseAgent):
                 continue
 
             # Build agent briefing
+            self.console.print(f"[dim]Building agent briefing for {phase_name}...[/]")
+            import sys; sys.stdout.flush()
             briefing = self._build_agent_briefing(phase_name)
+
+            # P1-6: inject PhaseBudget into briefing so agents can self-limit
+            if PhaseBudget is not None:
+                phase_budget = PhaseBudget.for_phase(phase_name).start()
+                briefing["phase_budget"] = phase_budget.to_dict()
+            else:
+                phase_budget = None
+            self.console.print(f"[dim]Briefing ready for {phase_name}[/]")
+            import sys; sys.stdout.flush()
 
             # Update mission memory phase
             mm_phase = self._PHASE_MAP.get(phase_name, phase_name)
@@ -815,6 +832,7 @@ class OrchestratorAgent(BaseAgent):
             # Instantiate and run specialist agent
             agent = self._get_agent(phase_name)
             self.log_info(f"Delegating to {agent.agent_name} for phase '{phase_name}'...")
+            import sys; sys.stdout.flush()
 
             try:
                 result = agent.run(target=target, briefing=briefing)
@@ -839,14 +857,34 @@ class OrchestratorAgent(BaseAgent):
             # Post-phase analysis
             analysis = self._analyze_phase_result(phase_name, result)
 
+            # P1-1: Critic loop — score evidence quality, surface gaps for next phase
+            critic = self._critic_score(phase_name, result)
+            if critic:
+                analysis["critic"] = critic
+                intel = self.mission_intelligence
+                if "phase_critic" not in intel:
+                    intel["phase_critic"] = {}
+                intel["phase_critic"][phase_name] = critic
+                if critic.get("confidence", 1.0) < 0.5:
+                    self.log_warning(
+                        f"[CRITIC] Phase '{phase_name}' low confidence "
+                        f"({critic['confidence']:.2f}) — gaps: {critic.get('gaps', [])}"
+                    )
+
             # Phase completion panel
             findings_count = analysis.get("findings_count", 0)
             recommended_next = analysis.get("recommended_next", "continue")
             key_insight = analysis.get("key_insight", "no insight")
+            critic_line = (
+                f"\n[dim]Critic: {critic.get('confidence', '?'):.2f} confidence | "
+                f"gaps: {critic.get('gaps', [])}[/]"
+                if critic else ""
+            )
             self.console.print(Panel(
                 f"[green]✅ Findings: {findings_count}[/]\n"
                 f"[white]Next: {recommended_next}[/]\n"
-                f"[white]Insight: {key_insight}[/]",
+                f"[white]Insight: {key_insight}[/]"
+                + critic_line,
                 title=f"[green]PHASE {phase_name.upper()} COMPLETE[/]",
                 border_style="green",
             ))
@@ -854,6 +892,7 @@ class OrchestratorAgent(BaseAgent):
             # Strategy update on critical finding
             if analysis.get("critical_finding"):
                 self._update_attack_strategy(analysis)
+
 
         # ── STEP 4: Mission summary ───────────────────────────────────────────
         return self._print_summary(target)
@@ -878,10 +917,11 @@ class OrchestratorAgent(BaseAgent):
             firewall_agent = FirewallDetectionAgent(mission_memory=self.memory)
             result = firewall_agent.run(target=target, briefing={"quick_scan": True})
             
-            if result.get("success"):
-                profile = result.get("result", {}).get("recommended_profile", "none")
-                detected = result.get("result", {}).get("detected_firewalls", [])
-                config = result.get("result", {}).get("evasion_config", {})
+            # Firewall agent returns a flat dict, not {"success": ..., "result": ...}
+            if isinstance(result, dict) and "evasion_profile" in result:
+                profile = str(result.get("evasion_profile", "none"))
+                detected = result.get("detected_technologies", []) or []
+                config = result.get("evasion_config", {}) or {}
                 
                 # Store in MissionMemory for other agents
                 self.memory.set_evasion_config(
@@ -934,6 +974,29 @@ class OrchestratorAgent(BaseAgent):
         # Backward compatibility: vuln_scan is merged into enumeration.
         if phase == "vuln_scan":
             phase = "enumeration"
+        
+        # RESUME LOGIC: If mission already has a phase and we're asking for "full",
+        # resume from the current phase instead of restarting from recon
+        current_mm_phase = self.memory.state.get("phase", "")
+        if phase == "full" and current_mm_phase and current_mm_phase != "init":
+            # Map mission memory phases back to orchestrator phases
+            mm_to_orch_phase = {
+                "recon": "recon",
+                "enum": "enumeration",
+                "exploit": "exploitation",
+                "privesc": "privesc",
+                "postexploit": "postexploit",
+                "report": "reporting"
+            }
+            resume_phase = mm_to_orch_phase.get(current_mm_phase, current_mm_phase)
+            if resume_phase in self.ATTACK_CHAIN:
+                self.log_info(f"📌 Resuming from phase: {resume_phase} (was {current_mm_phase})")
+                idx = self.ATTACK_CHAIN.index(resume_phase)
+                return self.ATTACK_CHAIN[idx:]
+            else:
+                self.log_warning(f"Unknown phase '{current_mm_phase}' in mission state, starting from recon")
+                return list(self.ATTACK_CHAIN)
+        
         if phase == "full":
             return list(self.ATTACK_CHAIN)
         if phase in self.ATTACK_CHAIN:
@@ -958,39 +1021,32 @@ class OrchestratorAgent(BaseAgent):
           reporting   → always runs
         """
         hosts = self.memory._state.get("hosts", {})
-        enum_result = self.phase_results.get("enumeration", {}).get("result", {})
-        exploitable_from_enum = 0
-        high_critical_from_enum = 0
-        if isinstance(enum_result, dict):
-            try:
-                exploitable_from_enum = int(enum_result.get("exploitable_vulns", 0) or 0)
-            except (TypeError, ValueError):
-                exploitable_from_enum = 0
-
-            all_vulns = enum_result.get("vulnerabilities", [])
-            if isinstance(all_vulns, list):
-                high_critical_from_enum = len([
-                    v for v in all_vulns
-                    if isinstance(v, dict)
-                    and str(v.get("severity", "")).lower() in {"high", "critical"}
-                ])
+        
+        # BUGFIX: Read vulns directly from MissionMemory, not phase_results
+        # (phase_results is empty on resume, causing exploitation to be skipped)
+        all_vulns_from_memory = []
+        for host_data in hosts.values():
+            all_vulns_from_memory.extend(host_data.get("vulnerabilities", []))
+        
+        exploitable_count = len([v for v in all_vulns_from_memory if v.get("exploitable")])
+        high_critical_count = len([v for v in all_vulns_from_memory if v.get("cvss", 0) >= 7.0])
 
         if phase_name == "exploitation":
-            if exploitable_from_enum > 0:
+            if exploitable_count > 0:
                 return True, (
-                    f"Primary gate: exploitable_vulns from enum = {exploitable_from_enum}"
+                    f"Primary gate: {exploitable_count} exploitable vulns in MissionMemory"
                 )
 
             # Secondary gate: high/critical vulns exist even if exploitability
             # reasoning was inconclusive.
-            if high_critical_from_enum >= 1:
+            if high_critical_count >= 1:
                 return True, (
-                    f"Secondary gate: {high_critical_from_enum} high/critical vulns found"
+                    f"Secondary gate: {high_critical_count} high/critical vulns (CVSS>=7.0)"
                 )
 
             return False, (
-                "Need exploitable_vulns >= 1 OR high/critical vulns from enum. "
-                f"Found: exploitable={exploitable_from_enum}, high_critical={high_critical_from_enum}"
+                "Need exploitable_vulns >= 1 OR high/critical vulns. "
+                f"Found: exploitable={exploitable_count}, high_critical={high_critical_count}"
             )
 
         gates: dict = {
@@ -1064,99 +1120,25 @@ class OrchestratorAgent(BaseAgent):
 
         if phase_name == "exploitation":
             # Exploitation needs: critical_path + all_attack_vectors
-            # This is where the intelligence chain pays off
-
-            # Pre-fetch exploit context for the critical path
-            exploit_rag = ""
-            cp = intel.get("critical_path", {})
-            if cp:
-                cve = cp.get("cve", "")
-                service = cp.get("service", "")
-                try:
-                    hits = self.chroma.get_rag_context(
-                        f"{cve} {service} exploit payload attack",
-                        collections=["exploitdb", "payloads", "hacktricks"],
-                        n=3,
-                    )
-                    exploit_rag = "\n".join(
-                        h.get("text", "")[:200] for h in hits
-                    )
-                except Exception:
-                    pass
-
-            # Ask LLM to synthesize an exploitation briefing
-            # from the accumulated intelligence
-            prompt = f"""You are preparing an exploitation briefing.
-All previous enumeration and vulnerability analysis is complete.
-
-Target: {self.memory.target}
-
-Confirmed exploitable vulnerabilities:
-{json.dumps(intel.get('exploitable_vulns', [])[:5], default=str, indent=2)[:800]}
-
-Critical attack path identified by analysis:
-{json.dumps(intel.get('critical_path', {}), default=str, indent=2)[:400]}
-
-All attack vectors ranked by priority:
-{json.dumps(intel.get('all_attack_vectors', [])[:6], default=str, indent=2)[:400]}
-
-Security controls status:
-{json.dumps(intel.get('security_controls', {}), default=str)[:200]}
-
-Exploitation guidance from analysis:
-{intel.get('exploitation_guidance', 'proceed with highest confidence vector')[:300]}
-
-Exploit knowledge base context:
-{exploit_rag[:400] if exploit_rag else 'query exploitdb for specific CVEs'}
-
-MITRE techniques applicable: {intel.get('mitre_chain', [])[:8]}
-
-Synthesize an exploitation briefing. Tell the agent:
-1. What to attempt first and why (evidence-based)
-2. What fallback vectors exist if first fails
-3. Whether evasion is needed based on security controls
-4. What success looks like (shell as which user)
-5. What to avoid based on what was tried
-
-Do not invent attack paths. Only use what the evidence shows.
-
-Return JSON:
-{{
-  "primary_target": {{
-    "service": "from evidence",
-    "port": 0,
-    "attack_vector": "from evidence",
-    "tool_approach": "derived from knowledge base",
-    "expected_outcome": "derived from CVE analysis"
-  }},
-  "fallback_vectors": [],
-  "evasion_needed": false,
-  "evasion_approach": "null or derived from security controls",
-  "avoid": [],
-  "success_criteria": "derived from vulnerability analysis",
-  "mitre_entry_points": []
-}}"""
-
-            result = self._direct_llm(prompt, task_complexity="high")
-
-            if "error" not in result:
-                result["mission_intelligence"] = intel
-                result["confirmed_vulns"] = intel.get("exploitable_vulns", [])
-                return result
-
-            # Fallback: pass raw intelligence without LLM synthesis
-            # Evasion is needed if any active security control is detected
+            # OPTIMIZATION: Skip heavy LLM synthesis, use direct intelligence passthrough
+            
+            # The fallback logic (lines 928-941) is actually better than waiting
+            # 45+ minutes for LLM synthesis - ExploitationAgent has its own intelligence
             sc = intel.get("security_controls", {})
             evasion_needed = any(
                 v not in [None, "", "none_detected", False]
                 for v in sc.values()
             ) if isinstance(sc, dict) else False
+            
+            self.log_info(f"Exploit briefing: {len(intel.get('exploitable_vulns',[]))} exploitable vulns")
+            
             return {
                 "primary_target": intel.get("critical_path", {}),
                 "fallback_vectors": intel.get("all_attack_vectors", []),
                 "evasion_needed": evasion_needed,
                 "confirmed_vulns": intel.get("exploitable_vulns", []),
                 "mission_intelligence": intel,
+                "note": "Briefing optimized - ExploitationAgent will handle attack selection",
             }
 
         if phase_name == "privesc":
@@ -1316,87 +1298,44 @@ Return JSON:
         self, hosts_summary: dict, prev_results: dict
     ) -> dict:
         """
-        Enumeration-phase briefing with technology-specific RAG pre-fetch.
-
-        Reads what ReconAgent wrote to MissionMemory.
-        For each discovered technology, queries RAG to find relevant
-        attack knowledge — not to tell EnumVulnAgent what to find,
-        but to give it a head start with domain knowledge.
+        Enumeration-phase briefing - FAST HEURISTIC VERSION.
+        
+        OPTIMIZATION: The original version did 3 RAG queries × 8 technologies = 24 queries
+        taking 10+ minutes on 147K docs. This version skips RAG/LLM synthesis entirely
+        and returns a simple briefing based on mission state.
+        
+        Reads what ReconAgent wrote to MissionMemory and returns actionable briefing.
         """
         state = self.memory.state
+        
+        # Count discovered entities
+        total_hosts = len(state.get("hosts", {}))
+        total_ports = sum(len(h.get("ports", [])) for h in state.get("hosts", {}).values())
+        
+        # Extract technologies from action log (used for logging only)
         action_log = state.get("action_log", [])
-
         tech_findings = [
             a.get("result", "")
             for a in action_log
             if "technology" in str(a.get("action", "")).lower()
             and a.get("result")
         ]
-
-        technology_intelligence = []
-        for tech_str in tech_findings[:8]:
-            tech_intel = {
-                "technology": tech_str,
-                "cve_context": "",
-                "exploit_context": "",
-                "technique_context": "",
-            }
-
-            try:
-                cve_hits = self.chroma.get_phase_rag_context(
-                    phase="enumeration",
-                    query=f"{tech_str} CVE vulnerability exploit",
-                    n=2,
-                )
-                tech_intel["cve_context"] = self._format_rag_compact(
-                    cve_hits, max_chars=200
-                )
-            except Exception:
-                pass
-
-            try:
-                exploit_hits = self.chroma.get_rag_context(
-                    f"{tech_str} exploit",
-                    collections=["exploitdb", "nuclei_templates"],
-                    n=2,
-                )
-                tech_intel["exploit_context"] = self._format_rag_compact(
-                    exploit_hits, max_chars=150
-                )
-            except Exception:
-                pass
-
-            try:
-                technique_hits = self.chroma.get_rag_context(
-                    f"{tech_str} pentest attack technique",
-                    collections=["hacktricks"],
-                    n=1,
-                )
-                tech_intel["technique_context"] = self._format_rag_compact(
-                    technique_hits, max_chars=150
-                )
-            except Exception:
-                pass
-
-            technology_intelligence.append(tech_intel)
-
-        # Deterministic/non-blocking briefing synthesis for enumeration.
-        # Avoids full-pipeline stalls on local LLM delays while preserving
-        # the RAG-enriched technology intelligence payload.
-        attack_priorities: list[str] = []
-        for t in technology_intelligence:
-            name = str(t.get("technology", "")).strip()
-            if name:
-                attack_priorities.append(name)
-
+        self.log_info(f"Enum briefing: {total_hosts} hosts, {total_ports} ports, {len(tech_findings)} techs")
+        
+        # Return lightweight briefing - EnumVulnAgent has its own RAG + intelligence
         return {
-            "technology_intelligence": technology_intelligence,
-            "attack_priorities": attack_priorities[:8],
-            "technology_briefings": [],
-            "rag_context": "RAG-enriched technology intelligence attached",
-            "enumeration_focus": "full service enumeration with priority on detected technologies",
+            "attack_priorities": [
+                "Enumerate all open ports with version detection",
+                "Run vulnerability scanners on discovered services",
+                "Check for known CVEs in detected software versions",
+            ],
+            "technology_intelligence": [
+                {"technology": t[:100], "note": "See EnumVulnAgent RAG for details"}
+                for t in tech_findings[:3]
+            ],
+            "enumeration_focus": f"{total_ports} ports across {total_hosts} host(s) - full enumeration required",
             "hosts_summary": hosts_summary,
-            "recent_results": prev_results,
+            "note": "Briefing optimized - EnumVulnAgent will perform its own RAG lookups per finding",
         }
 
     def _format_rag_compact(
@@ -1446,6 +1385,84 @@ Return JSON:
         ))
         self.memory.log_action("Orchestrator", "strategy_update", reason)
 
+    def _critic_score(self, phase: str, result: dict) -> dict | None:
+        """
+        P1-1: Post-phase Critic — evaluate evidence quality via a short LLM call.
+
+        Asks the reasoning model to score confidence (0–10) and list unresolved gaps.
+        The call is capped at 30 s to avoid slowing the mission.
+
+        Returns::
+
+            {
+                "confidence": float,   # 0.0–1.0
+                "gaps": [str, ...],    # aspects still unknown after this phase
+                "next_priority": str,  # recommended focus for next phase
+            }
+
+        Returns None on any failure so the caller is never blocked.
+        """
+        try:
+            import concurrent.futures as _cf
+
+            inner = result.get("result", {}) or {}
+            success = result.get("success", False)
+
+            # Build a compact evidence summary (avoid huge prompts)
+            evidence_lines = []
+            for key in ("hosts_found", "ports_found", "services_found", "vulnerabilities",
+                        "exploitable_vulns", "shells_obtained", "loot_count", "error"):
+                val = inner.get(key)
+                if val is not None:
+                    evidence_lines.append(f"  {key}: {val}")
+
+            evidence = "\n".join(evidence_lines) or "  (no structured result)"
+
+            prompt = (
+                f"You are a pentesting team lead reviewing phase results.\n\n"
+                f"PHASE: {phase}\n"
+                f"OUTCOME: {'success' if success else 'failure'}\n"
+                f"EVIDENCE:\n{evidence}\n\n"
+                f"Score our confidence (0-10) in having a COMPLETE picture of the target after this phase.\n"
+                f"List up to 3 aspects that are STILL UNKNOWN or need more investigation.\n"
+                f"State the single highest-priority topic for the next phase.\n\n"
+                f"Reply with ONLY valid JSON:\n"
+                f'{{\"confidence\": <0-10>, \"gaps\": [\"...\", \"...\"], \"next_priority\": \"...\"}}'
+            )
+
+            def _invoke():
+                raw = self.llm.invoke(prompt)
+                return raw.content if hasattr(raw, "content") else str(raw)
+
+            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_invoke)
+                try:
+                    raw = future.result(timeout=30)
+                except _cf.TimeoutError:
+                    self.log_warning(f"[CRITIC] LLM timeout for phase '{phase}' — skipping critic")
+                    return None
+
+            # Parse JSON
+            import re as _re
+            m = _re.search(r'\{[^{}]+\}', raw, _re.DOTALL)
+            if not m:
+                return None
+            data = json.loads(m.group())
+            raw_conf = float(data.get("confidence", 5))
+            confidence = max(0.0, min(1.0, raw_conf / 10.0))
+            gaps = [str(g) for g in (data.get("gaps") or [])[:5]]
+            next_priority = str(data.get("next_priority", ""))
+            self.log_info(
+                f"[CRITIC] Phase '{phase}': confidence={confidence:.2f}, "
+                f"gaps={gaps}, next={next_priority}"
+            )
+            return {"confidence": confidence, "gaps": gaps, "next_priority": next_priority}
+
+        except Exception as e:
+            self.log_warning(f"[CRITIC] Failed for phase '{phase}': {e}")
+            return None
+
+
     def _get_agent(self, phase_name: str) -> "BaseAgent":
         """
         Lazily import and instantiate the specialist agent for *phase_name*.
@@ -1454,12 +1471,14 @@ Return JSON:
         once all specialists are implemented).
         """
         mapping = {
+            "firewall":    ("agents.firewall_agent",    "FirewallDetectionAgent"),
             "recon":       ("agents.recon_agent",       "ReconAgent"),
             "enumeration": ("agents.enum_vuln_agent",   "EnumVulnAgent"),
             "vuln_scan":   ("agents.enum_vuln_agent",   "EnumVulnAgent"),
             "exploitation":("agents.exploitation_agent","ExploitationAgent"),
             "privesc":     ("agents.privesc_agent",     "PrivEscAgent"),
             "postexploit": ("agents.postexploit_agent", "PostExploitAgent"),
+            "mitigation":  ("agents.mitigation_agent",  "MitigationAgent"),
             "reporting":   ("agents.reporting_agent",   "ReportingAgent"),
         }
 

@@ -766,10 +766,7 @@ class ReconAgent(BaseAgent):
         Unified wave planner for all target types.
         Uses LLM + RAG + MITRE guidance, with heuristic fallback only on hard failure.
         """
-        # Keep recon wave planning deterministic/non-blocking to prevent
-        # long LLM waits from stalling the full mission pipeline.
-        del wave_results
-        return self._heuristic_next_wave(wave_num)
+        return self._intelligent_next_wave(wave_num, wave_results)
 
     def _intelligent_next_wave(self, wave_num: int, wave_results: dict[str, str]) -> tuple[list[str], bool]:
         """

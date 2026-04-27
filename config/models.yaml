@@ -4,23 +4,23 @@ models:
   # The 7B model handles all tasks: recon, enum, exploitation, AND orchestration.
   # TASK 6: Reduced num_ctx from 8192 to 2048 for faster inference (less timeout risk)
   default:
-    name: cyberagent-pentest:7b
-    base_model: qwen2.5:7b-instruct-q4_K_M
+    name: cyberagent-pentest-coder:7b
+    base_model: qwen2.5-coder:7b-instruct-q4_K_S
     use_for: [recon, enumeration, vuln_scan, exploitation, post_exploit, reporting, orchestrator, privesc]
     temperature: 0.1
     num_ctx: 2048
     num_predict: 512
-    description: "Qwen2.5:7b with expert pentest system prompt — unified for all phases"
+    description: "CyberAgent prompt-tuned Qwen2.5-Coder:7b unified runtime model"
   
   # Reasoning now points to same model (prevents swapping)
   reasoning:
-    name: cyberagent-pentest:7b
-    base_model: qwen2.5:7b-instruct-q4_K_M
+    name: cyberagent-pentest-coder:7b
+    base_model: qwen2.5-coder:7b-instruct-q4_K_S
     use_for: [orchestrator, privesc, exploit_chaining, report_generation]
     temperature: 0.05
     num_ctx: 2048
     num_predict: 512
-    description: "Same 7B model for reasoning tasks — prevents model swapping"
+    description: "Same CyberAgent prompt-tuned Qwen2.5-Coder:7b for reasoning tasks"
   
   embedding:
     name: nomic-embed-text
@@ -48,13 +48,13 @@ models:
 
   # ── Base models (fallback if tuned models fail) ──
   default_base:
-    name: qwen2.5:7b-instruct-q4_K_M
+    name: qwen2.5-coder:7b-instruct-q4_K_S
     use_for: [fallback]
     temperature: 0.1
     num_ctx: 2048
     num_predict: 512
   reasoning_base:
-    name: qwen2.5:7b-instruct-q4_K_M
+    name: qwen2.5-coder:7b-instruct-q4_K_S
     use_for: [fallback]
     temperature: 0.05
     num_ctx: 2048

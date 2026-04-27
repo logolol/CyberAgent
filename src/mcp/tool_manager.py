@@ -170,11 +170,18 @@ class DynamicToolManager:
         "_default": 300,
     }
 
-    def __init__(self):
+    def __init__(self, allow_auto_install: bool | None = None):
         self.discovered: dict[str, str] = {}       # {name: abs_path}
         self.installed_this_session: list[dict] = []
         self.failed: list[str] = []
         self._usage_log: dict[str, int] = {}       # {name: call_count}
+        self._mcp = None
+        env_auto = os.getenv("CA_AUTO_INSTALL_TOOLS", "0").strip().lower()
+        self.allow_auto_install = (
+            allow_auto_install
+            if allow_auto_install is not None
+            else env_auto in {"1", "true", "yes", "on"}
+        )
 
         self.search_paths: list[Path] = [
             Path("/usr/bin"),
@@ -204,6 +211,12 @@ class DynamicToolManager:
             )
         else:
             self.discover_all()
+
+        try:
+            from mcp.pentestai_mcp import PentestAIMCP
+            self._mcp = PentestAIMCP()
+        except Exception:
+            self._mcp = None
 
     # ── Cache ────────────────────────────────────────────────────────────────
 
@@ -386,10 +399,15 @@ class DynamicToolManager:
 
         path = self.find(tool_name)
         if not path:
-            console.print(
-                f"[yellow][[ToolManager]][/] '{tool_name}' not found — attempting auto-install..."
-            )
-            path = self.auto_install(tool_name)
+            if self.allow_auto_install:
+                console.print(
+                    f"[yellow][[ToolManager]][/] '{tool_name}' not found — attempting auto-install..."
+                )
+                path = self.auto_install(tool_name)
+            else:
+                console.print(
+                    f"[yellow][[ToolManager]][/] '{tool_name}' not found and auto-install is disabled"
+                )
 
         if not path:
             return {
@@ -476,6 +494,12 @@ class DynamicToolManager:
         Try installation in order: apt → pip → gem → go → github release → git clone.
         Returns installed binary path or None.
         """
+        if not self.allow_auto_install:
+            console.print(
+                f"[yellow][[ToolManager]][/] Auto-install disabled by policy for '{tool_name}'"
+            )
+            self.failed.append(tool_name)
+            return None
         console.print(f"[cyan][[ToolManager]][/] Auto-installing: [bold]{tool_name}[/]")
 
         # 1. APT
@@ -955,12 +979,48 @@ Return ONLY the module path (e.g., exploit/unix/ftp/vsftpd_234_backdoor), nothin
             args = self.configure_for_attack(tool_name, attack_context)
             if not args:
                 return {"error": "configure_for_attack returned empty args", "tool": tool_name}
-            
+
+            # Prefer MCP execution when available, then fall back to local execution.
+            if self._mcp is not None:
+                try:
+                    mcp_result = self._mcp.execute_tool(
+                        tool_name=tool_name,
+                        args=args,
+                        purpose=attack_context.get("purpose", ""),
+                        timeout=timeout,
+                    )
+                    if mcp_result.get("executed_via_mcp"):
+                        stdout = str(
+                            mcp_result.get("stdout", "")
+                            or mcp_result.get("output", "")
+                            or ""
+                        )
+                        stderr = str(mcp_result.get("stderr", "") or "")
+                        rc_raw = mcp_result.get("returncode", mcp_result.get("rc", 0))
+                        try:
+                            returncode = int(rc_raw)
+                        except Exception:
+                            returncode = 0
+                        return {
+                            "success": returncode == 0,
+                            "tool": tool_name,
+                            "command": mcp_result.get("command", f"{tool_name} {' '.join(args)}"),
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "returncode": returncode,
+                            "duration": float(mcp_result.get("duration", 0.0) or 0.0),
+                            "purpose": attack_context.get("purpose", ""),
+                            "executed_via_mcp": True,
+                        }
+                except Exception as mcp_error:
+                    _log.debug(f"MCP execute fallback to local for {tool_name}: {mcp_error}")
+
             result = self.use(
                 tool_name, args,
                 purpose=attack_context.get("purpose", ""),
                 timeout=timeout,
             )
+            result["executed_via_mcp"] = False
             return result
             
         except Exception as e:

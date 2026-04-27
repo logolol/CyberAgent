@@ -77,6 +77,21 @@ class BaseAgent:
     Sub-classes must implement:
         run(self, target: str, briefing: dict = {}) -> dict
     """
+    # Strict ReAct action schema: only these internal actions are executable directly.
+    INTERNAL_ACTIONS = {"search_rag", "read_memory", "store_finding"}
+    # Never allow shell interpreters or command wrappers as "tools".
+    BLOCKED_ACTIONS = {
+        "bash", "sh", "zsh", "dash", "fish",
+        "python", "python3", "perl", "ruby", "node",
+        "pwsh", "powershell", "cmd", "eval",
+    }
+    # Allowed keys for ACTION_INPUT in strict schema.
+    ACTION_INPUT_KEYS = {
+        "args", "purpose", "target", "ip", "port", "service", "cve", "query",
+        "search", "term", "phase", "context", "finding_type", "username",
+        "password", "hash", "type", "user", "shell_path", "content", "path",
+        "hostname", "version", "banner", "description", "exploitable", "cvss",
+    }
 
     def __init__(
         self,
@@ -90,14 +105,19 @@ class BaseAgent:
         self.memory = mission_memory
         self.chroma = ChromaManager()
         self.tools = DynamicToolManager()
-        self.console = Console()
+        self.console = Console(force_terminal=True)
         self.logger = logging.getLogger(f"agent.{agent_name}")
         self.max_iterations = max_react_iterations
+        # Default is LLM-only mode (no deterministic fallback chains).
+        self.allow_deterministic_fallback = os.getenv(
+            "CA_ALLOW_DETERMINISTIC_FALLBACK", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         
         # Cognitive architecture state
         self._executed_commands: set[str] = set()  # Prevent command repetition
         self._phase_state: dict = {}  # Current phase context
         self._reflection_log: list[dict] = []  # Track reasoning
+        self._critic_notes: list[str] = []  # Short feedback injected each iteration
     
     # ══════════════════════════════════════════════════════════════════════════
     # COGNITIVE ARCHITECTURE: Plan → Execute → Reflect → Adapt
@@ -161,7 +181,17 @@ class BaseAgent:
                 break
             
             # Check for command repetition
-            cmd_key = f"{action['tool']}:{action.get('args', [])}"
+            target_value = str(getattr(self, "target", "") or "")
+            resolved_ip = str(getattr(self, "resolved_ip", "") or "")
+            ip_value = resolved_ip or target_value
+            rendered_args = [
+                str(a)
+                .replace("{target}", target_value)
+                .replace("{ip}", ip_value)
+                .replace("TARGET_IP", target_value)
+                for a in action.get("args", [])
+            ]
+            cmd_key = f"{action['tool']}:{rendered_args}"
             if cmd_key in self._executed_commands:
                 self.log_warning(f"[SELECT] Skipping repeated command: {cmd_key}")
                 continue
@@ -231,13 +261,16 @@ class BaseAgent:
     def _cognitive_select(self, plan: dict) -> dict | None:
         """
         SELECT phase: Choose the single most valuable action.
+        
+        P0-5 / P1-3: When no static tool maps to the gap, ask the LLM to pick one
+        instead of silently returning None and stalling the cycle.
         """
         if not plan.get("priority_gap"):
             return None
         
         gap = plan["priority_gap"]
         
-        # Map gaps to tools
+        # Map gaps to tools — extend as new gaps are discovered
         tool_mapping = {
             "ports": ("nmap", ["-sV", "-sC", "-p-", "{target}"]),
             "services": ("nmap", ["-sV", "-sC", "{target}"]),
@@ -245,11 +278,45 @@ class BaseAgent:
             "web_paths": ("gobuster", ["dir", "-u", "http://{target}", "-w", "/usr/share/wordlists/dirb/common.txt"]),
             "smb_info": ("enum4linux", ["-a", "{target}"]),
             "ftp_info": ("nmap", ["-p21", "--script", "ftp-*", "{target}"]),
+            "dns_info": ("nmap", ["-p53", "--script", "dns-*", "{target}"]),
+            "ssh_info": ("nmap", ["-p22", "--script", "ssh-*", "{target}"]),
+            "http_info": ("nikto", ["-h", "{target}", "-maxtime", "120"]),
+            "exploit": ("searchsploit", ["{target}"]),
         }
         
         if gap in tool_mapping:
             tool, args = tool_mapping[gap]
             return {"tool": tool, "args": args, "purpose": f"Fill knowledge gap: {gap}"}
+        
+        # P1-3: LLM fallback when static mapping has no match
+        # Ask the LLM to choose a tool for this specific gap
+        try:
+            target_val = str(getattr(self, "target", "") or "")
+            prompt = (
+                f"You are a pentester. We need to fill this knowledge gap: '{gap}'\n"
+                f"Target: {target_val}\n"
+                f"Installed tools: nmap, nikto, gobuster, enum4linux, searchsploit, hydra, sqlmap, nuclei\n"
+                f"Reply with ONLY JSON: {{\"tool\": \"<tool>\", \"args\": [\"<arg1>\", \"<arg2>\"], \"purpose\": \"<one line>\"}}\n"
+                f"The tool MUST be from the installed list. Replace TARGET with the actual IP if needed."
+            )
+            raw = self.llm.invoke(prompt)
+            response = raw.content if hasattr(raw, "content") else str(raw)
+            import json as _json, re as _re
+            m = _re.search(r'\{[^{}]+\}', response, _re.DOTALL)
+            if m:
+                spec = _json.loads(m.group())
+                tool = spec.get("tool", "").strip().lower()
+                if tool and self._validate_action(tool):
+                    args = [
+                        str(a).replace("TARGET", target_val).replace("{target}", target_val)
+                        for a in spec.get("args", [])
+                    ]
+                    self.logger.info("[COGNITIVE_SELECT] LLM chose '%s' for gap '%s'", tool, gap)
+                    return {"tool": tool, "args": args, "purpose": spec.get("purpose", f"Fill gap: {gap}")}
+                else:
+                    self.logger.warning("[COGNITIVE_SELECT] LLM proposed invalid tool '%s' for gap '%s'", tool, gap)
+        except Exception as e:
+            self.logger.warning("[COGNITIVE_SELECT] LLM fallback failed for gap '%s': %s", gap, e)
         
         return None
     
@@ -258,17 +325,32 @@ class BaseAgent:
         EXECUTE phase: Run the selected tool and capture output.
         """
         tool = action["tool"]
-        args = action.get("args", [])
+        target_value = str(getattr(self, "target", "") or "")
+        resolved_ip = str(getattr(self, "resolved_ip", "") or "")
+        ip_value = resolved_ip or target_value
+        args = [
+            str(a)
+            .replace("{target}", target_value)
+            .replace("{ip}", ip_value)
+            .replace("TARGET_IP", target_value)
+            for a in action.get("args", [])
+        ]
         purpose = action.get("purpose", "")
         
         self.console.print(f"[dim]🔧 Executing: {tool} {' '.join(str(a) for a in args)}[/]")
         
         try:
             result = self.tools.use(tool, args=args, purpose=purpose)
+            output = (
+                result.get("stdout", "")
+                or result.get("output", "")
+                or result.get("stderr", "")
+                or ""
+            )
             return {
-                "success": True,
-                "output": result.get("output", str(result)),
-                "exit_code": result.get("exit_code", 0),
+                "success": bool(result.get("success", False)),
+                "output": output,
+                "exit_code": result.get("returncode", result.get("exit_code", 0)),
                 "duration": result.get("duration", 0),
             }
         except Exception as e:
@@ -336,7 +418,11 @@ class BaseAgent:
         return False
     
     def _identify_knowledge_gaps(self, goal: str, known_intel: dict) -> list[str]:
-        """Identify what information is missing to achieve the goal."""
+        """Identify what information is missing to achieve the goal.
+        
+        P1-2: Merges static gap detection with uncertainty tracking from MissionMemory.
+        This lets agents explore what they don't know, not just what's listed.
+        """
         gaps = []
         
         if "ports" not in known_intel:
@@ -345,6 +431,17 @@ class BaseAgent:
             gaps.append("services")
         if "vulnerabilities" not in known_intel:
             gaps.append("vulnerabilities")
+        
+        # P1-2: Incorporate uncertainty-tracked unknowns from MissionMemory
+        try:
+            target_ip = str(getattr(self, "target_ip", None) or getattr(self, "target", "") or "")
+            if target_ip and hasattr(self.memory, "get_unknown_aspects"):
+                unknown_aspects = self.memory.get_unknown_aspects(target_ip)
+                for aspect in unknown_aspects:
+                    if aspect not in gaps:
+                        gaps.append(aspect)
+        except Exception:
+            pass  # Never break the cognitive cycle over uncertainty lookup
         
         return gaps
     
@@ -668,10 +765,21 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
             action_m = re.search(pattern, raw, re.IGNORECASE)
             if action_m:
                 action = action_m.group(1).strip()
-                # Validate action is a known tool
+                # P0-5: enforce schema — validate action against allowlist
                 if self._validate_action(action):
                     result["action"] = action
                     break
+                else:
+                    # Log explicitly so operators can trace LLM hallucinations
+                    normalized = action.strip().lower()
+                    if normalized in self.BLOCKED_ACTIONS:
+                        self.logger.warning(
+                            "[SCHEMA] ACTION '%s' BLOCKED (shell interpreter) — rejected", action
+                        )
+                    else:
+                        self.logger.warning(
+                            "[SCHEMA] ACTION '%s' not in allowlist or not installed — rejected", action
+                        )
 
         # ACTION_INPUT - multiple patterns
         input_patterns = [
@@ -747,18 +855,21 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         return False
     
     def _validate_action(self, action: str) -> bool:
-        """Validate that an action is a known tool or command."""
-        # Known tools
-        known_tools = {
-            "nmap", "gobuster", "nikto", "hydra", "sqlmap",
-            "msfconsole", "searchsploit", "curl", "wget", "nc",
-            "netcat", "enum4linux", "smbclient", "smbmap",
-            "python3", "python", "bash", "sh",
-            "dig", "whois", "host", "nslookup",
-            "FINISH", "DONE", "COMPLETE", "NONE",
-        }
-        
-        return action.lower() in {t.lower() for t in known_tools}
+        """Validate that an action is a safe internal action or installed tool."""
+        normalized = str(action or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized in self.BLOCKED_ACTIONS:
+            return False
+        if normalized in self.INTERNAL_ACTIONS:
+            return True
+        # Explicit finish markers are not executable actions.
+        if normalized in {"finish", "done", "complete", "none"}:
+            return False
+        try:
+            return bool(self.tools.find(normalized))
+        except Exception:
+            return False
 
     # ── Command extraction and validation ─────────────────────────────────────
 
@@ -827,26 +938,47 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         Validate a command before execution.
         Returns {valid: bool, issues: list[str], suggestions: list[str]}.
         """
+        tool_name = str(tool or "").strip().lower()
+        action_input = action_input if isinstance(action_input, dict) else {}
         issues: list[str] = []
         suggestions: list[str] = []
+        
+        # Check 0: strict action/tool safety
+        if tool_name in self.BLOCKED_ACTIONS:
+            issues.append(f"Blocked unsafe action '{tool_name}'")
+            suggestions.append("Choose a real pentest tool, not a shell interpreter")
+        elif not self._validate_action(tool_name):
+            issues.append(f"Unknown or unavailable action '{tool_name}'")
+            suggestions.append("Use an installed tool or a supported internal action")
+        
+        # Check schema keys
+        unknown_keys = [k for k in action_input.keys() if k not in self.ACTION_INPUT_KEYS]
+        if unknown_keys:
+            issues.append(f"Unsupported ACTION_INPUT keys: {', '.join(unknown_keys[:3])}")
+            suggestions.append("Use strict ACTION_INPUT schema keys only")
 
         # Check 1: Tool exists
-        try:
+        if tool_name not in self.INTERNAL_ACTIONS and tool_name not in self.BLOCKED_ACTIONS:
+            try:
             # Try to get tool info from RAG
-            tool_info = self.chroma.get_rag_context(f"{tool} usage examples", n=2)
-            if not tool_info:
-                issues.append(f"Tool '{tool}' not found in knowledge base")
-                suggestions.append(f"Verify tool name or check if it's installed")
-        except Exception:
-            pass
+                tool_info = self.chroma.get_rag_context(f"{tool_name} usage examples", n=2)
+                if not tool_info:
+                    issues.append(f"Tool '{tool_name}' not found in knowledge base")
+                    suggestions.append(f"Verify tool name or check if it's installed")
+            except Exception:
+                pass
 
         # Check 2: Required arguments
         args = action_input.get("args", [])
+        if args and not isinstance(args, list):
+            issues.append("ACTION_INPUT.args must be a JSON array")
+            suggestions.append('Use "args": ["-flag", "value"]')
+            args = [str(args)]
         if not args or len(args) == 0:
             # Some tools require arguments
-            if tool.lower() in ["nmap", "hydra", "sqlmap", "gobuster", "nikto"]:
-                issues.append(f"Tool '{tool}' typically requires arguments")
-                suggestions.append(f"Check {tool} --help for required parameters")
+            if tool_name in ["nmap", "hydra", "sqlmap", "gobuster", "nikto"]:
+                issues.append(f"Tool '{tool_name}' typically requires arguments")
+                suggestions.append(f"Check {tool_name} --help for required parameters")
 
         # Check 3: Argument format validation
         if isinstance(args, list):
@@ -866,9 +998,9 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
                         suggestions.append(f"Provide value for {arg_str} flag")
 
         # Check 4: Cross-reference with tool's expected syntax from RAG
-        if tool.lower() in ["nmap", "hydra", "sqlmap", "gobuster"]:
+        if tool_name in ["nmap", "hydra", "sqlmap", "gobuster"]:
             try:
-                rag_results = self.chroma.get_rag_context(f"{tool} command syntax examples", n=3)
+                _ = self.chroma.get_rag_context(f"{tool_name} command syntax examples", n=3)
                 # Could add more sophisticated syntax checking here
             except Exception:
                 pass
@@ -877,7 +1009,7 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
             "valid": len(issues) == 0,
             "issues": issues,
             "suggestions": suggestions,
-            "tool": tool,
+            "tool": tool_name,
             "confidence": 1.0 if len(issues) == 0 else max(0.0, 1.0 - (len(issues) * 0.3))
         }
 
@@ -890,6 +1022,9 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         Never raises — always returns a dict.
         """
         action = action.strip().lower()
+        action_input = action_input or {}
+        if action in self.BLOCKED_ACTIONS:
+            return {"error": f"Blocked unsafe action: {action}", "tool": action}
 
         if action == "search_rag":
             query = action_input.get("query", "")
@@ -943,15 +1078,37 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         tool_args = action_input.get("args", [])
         if not isinstance(tool_args, list):
             tool_args = [str(tool_args)]
+        target_value = str(
+            action_input.get("target")
+            or action_input.get("ip")
+            or getattr(self, "target", "")
+        ).strip()
+        rendered_args = [
+            str(a).replace("{target}", target_value).replace("{ip}", target_value)
+            if target_value else str(a)
+            for a in tool_args
+        ]
         purpose = action_input.get("purpose", f"{self.agent_name} task")
         context = action_input.get("context", {})
+        if not isinstance(context, dict):
+            context = {}
+        attack_context = {
+            **context,
+            "target": context.get("target", target_value),
+            "service": action_input.get("service") or context.get("service", ""),
+            "port": action_input.get("port") or context.get("port", 0),
+            "cve": action_input.get("cve") or context.get("cve", ""),
+            "purpose": purpose,
+            "known_info": context.get("known_info", ""),
+        }
+        if rendered_args:
+            attack_context["args_hint"] = rendered_args
         
         try:
             # Try intelligent generation first (LLM decides args)
             result = self.tools.use_intelligent(
                 tool_name=action,
-                purpose=purpose,
-                context=context,
+                attack_context=attack_context,
                 timeout=120,
             )
             
@@ -959,14 +1116,14 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
             if result.get("error") or result.get("returncode", 0) != 0:
                 self.log_warning(f"use_intelligent({action}) failed, trying direct...")
                 # Fallback to direct use with provided args
-                result = self.tools.use(action, args=tool_args, purpose=purpose)
+                result = self.tools.use(action, args=rendered_args, purpose=purpose)
             
             return result
             
         except Exception as e:
             # Final fallback: direct use
             try:
-                return self.tools.use(action, args=tool_args, purpose=purpose)
+                return self.tools.use(action, args=rendered_args, purpose=purpose)
             except Exception as e2:
                 return {"error": str(e2), "tool": action, "fallback_error": str(e)}
 
@@ -993,8 +1150,26 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         ]
         actions_taken: list[str] = []
         reformat_attempts = 0
+        
+        # Dynamic budget hint per task/phase (keeps loops short for simple phases).
+        task_low = (task or "").lower()
+        if "report" in task_low:
+            iteration_budget = min(self.max_iterations, 2)
+        elif any(k in task_low for k in ("exploit", "privesc", "postexploit")):
+            iteration_budget = min(self.max_iterations, 5)
+        elif any(k in task_low for k in ("enum", "scan", "recon")):
+            iteration_budget = min(self.max_iterations, 4)
+        else:
+            iteration_budget = self.max_iterations
+        messages.append({
+            "role": "user",
+            "content": (
+                f"EXECUTION BUDGET: Maximum {iteration_budget} ACTION iterations.\n"
+                "Prioritize highest-impact actions first and avoid repeated scans."
+            ),
+        })
 
-        for i in range(self.max_iterations):
+        for i in range(iteration_budget):
             prompt = self._messages_to_prompt(messages)
 
             # ── LLM call ────────────────────────────────────────────────
@@ -1155,10 +1330,25 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
                 "role": "user",
                 "content": f"OBSERVATION: {json.dumps(observation)}",
             })
+            
+            # Critic feedback loop: inject concise guidance from latest outcome.
+            if isinstance(result, dict):
+                if result.get("error"):
+                    critic_note = (
+                        "CRITIC_FEEDBACK: previous action failed. "
+                        "Change tool or adjust arguments; do not repeat the same action."
+                    )
+                else:
+                    critic_note = (
+                        "CRITIC_FEEDBACK: keep momentum. "
+                        "Use the new observation to choose one higher-value next action."
+                    )
+                self._critic_notes.append(critic_note)
+                messages.append({"role": "user", "content": critic_note})
 
         # Max iterations reached
-        self.log_warning(f"Max iterations ({self.max_iterations}) reached without FINAL_ANSWER")
-        return self._fail_result(actions_taken, self.max_iterations, "max_iterations_reached")
+        self.log_warning(f"Max iterations ({iteration_budget}) reached without FINAL_ANSWER")
+        return self._fail_result(actions_taken, iteration_budget, "max_iterations_reached")
 
     def _fail_result(self, actions_taken: list, iterations: int, error: str) -> dict:
         return {

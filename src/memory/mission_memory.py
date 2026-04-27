@@ -126,6 +126,12 @@ class MissionMemory:
                 "ports": [], "vulnerabilities": [],
                 "exploits_attempted": [], "shells": [],
                 "credentials": [], "privesc_paths": [], "loot": [],
+                # P1-2: Uncertainty tracking — distinguish "never scanned" from "scanned & empty"
+                "uncertainty": {
+                    "known": [],    # aspects we have evidence for
+                    "unknown": [],  # aspects explicitly identified as unknown
+                    "confidence": 0.5,  # overall host picture confidence (0-1)
+                },
             }
 
     def add_host(self, ip: str, hostname: str = ""):
@@ -344,6 +350,66 @@ class MissionMemory:
     def get_evasion_config(self) -> dict:
         """Get current evasion configuration."""
         return self._state.get("evasion", {"profile": "none", "config": {}})
+
+    # ── Uncertainty Tracking ───────────────────────────────────────────────────
+    # P1-2: Track known vs unknown aspects per host so agents explore gaps,
+    # not just repeat the same scans on already-covered areas.
+
+    def _ensure_uncertainty(self, ip: str) -> dict:
+        """Return the uncertainty dict for *ip*, back-filling legacy hosts."""
+        self._ensure_host(ip)
+        host = self._state["hosts"][ip]
+        if "uncertainty" not in host:
+            host["uncertainty"] = {"known": [], "unknown": [], "confidence": 0.5}
+        return host["uncertainty"]
+
+    def mark_known(self, ip: str, aspect: str, confidence_boost: float = 0.1) -> None:
+        """
+        Mark *aspect* as known/covered for *ip*.
+
+        Examples::
+
+            memory.mark_known("10.0.0.1", "ports_scanned")
+            memory.mark_known("10.0.0.1", "http_enumerated", confidence_boost=0.15)
+        """
+        u = self._ensure_uncertainty(ip)
+        if aspect not in u["known"]:
+            u["known"].append(aspect)
+        # Remove from unknown if previously marked
+        if aspect in u["unknown"]:
+            u["unknown"].remove(aspect)
+        u["confidence"] = min(1.0, u["confidence"] + confidence_boost)
+        self.save_state()
+
+    def mark_unknown(self, ip: str, aspect: str, confidence_penalty: float = 0.05) -> None:
+        """
+        Explicitly mark *aspect* as an open unknown for *ip*.
+        The agent will use this to prioritise future tool calls.
+        """
+        u = self._ensure_uncertainty(ip)
+        if aspect not in u["unknown"]:
+            u["unknown"].append(aspect)
+        u["confidence"] = max(0.1, u["confidence"] - confidence_penalty)
+        self.save_state()
+
+    def get_unknown_aspects(self, ip: str) -> list[str]:
+        """Return list of aspects still unknown for *ip*."""
+        if ip not in self._state.get("hosts", {}):
+            return []
+        return self._state["hosts"][ip].get("uncertainty", {}).get("unknown", [])
+
+    def get_host_confidence(self, ip: str) -> float:
+        """Return overall confidence in the host picture (0–1)."""
+        if ip not in self._state.get("hosts", {}):
+            return 0.0
+        return self._state["hosts"][ip].get("uncertainty", {}).get("confidence", 0.5)
+
+    def get_low_confidence_hosts(self, threshold: float = 0.6) -> list[str]:
+        """Return IPs whose overall confidence is below *threshold*."""
+        return [
+            ip for ip, host in self._state.get("hosts", {}).items()
+            if host.get("uncertainty", {}).get("confidence", 0.5) < threshold
+        ]
 
     # ── Attack Graph management ────────────────────────────────
     # Impact weights for prioritization: root=1.0, user=0.7, service=0.4, info=0.1
