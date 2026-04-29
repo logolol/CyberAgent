@@ -111,11 +111,27 @@ class MissionMemory:
 
     # ── Phase / status ─────────────────────────────────────────────────
     def update_phase(self, phase: str):
-        valid = {"recon","enum","vuln","exploit","privesc","postexploit","report"}
-        if phase not in valid:
-            raise ValueError(f"Invalid phase: {phase}. Must be one of {valid}")
-        self._state["phase"] = phase
-        self._append_chain("system", f"phase_change → {phase}", "ok")
+        phase_map = {
+            "recon": "recon",
+            "enum": "enum",
+            "enumeration": "enum",
+            "vuln": "vuln",
+            "vuln_scan": "vuln",
+            "exploit": "exploit",
+            "exploitation": "exploit",
+            "privesc": "privesc",
+            "postexploit": "postexploit",
+            "report": "report",
+            "reporting": "report",
+            # Mitigation is tracked between exploitation and reporting; map to report phase family.
+            "mitigation": "report",
+        }
+        normalized = phase_map.get(str(phase).strip().lower())
+        valid = {"recon", "enum", "vuln", "exploit", "privesc", "postexploit", "report"}
+        if normalized not in valid:
+            raise ValueError(f"Invalid phase: {phase}. Must be one of {valid} or aliases {set(phase_map.keys())}")
+        self._state["phase"] = normalized
+        self._append_chain("system", f"phase_change → {normalized}", "ok")
         self.save_state()
 
     # ── Host management ────────────────────────────────────────────────
@@ -223,7 +239,8 @@ class MissionMemory:
             "reverse_shell", "bind_shell", "bindshell",
             "anon_ftp", "ftp_login", "rsh", "rexec", "telnet",
             "rce", "session", "unknown",
-            "bash", "sh", "reverse", "bind", "ssh", "ssh_credential"  # Extended types
+            "bash", "sh", "reverse", "bind", "ssh", "ssh_credential",
+            "vsftpd_backdoor", "samba_usermap", "distcc_exec", "unreal_backdoor"  # Extended types
         }
         shell_type = str(shell_type).strip().lower()
         if shell_type not in valid_types:

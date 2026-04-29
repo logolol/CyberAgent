@@ -633,6 +633,26 @@ class ReconAgent(BaseAgent):
         # ══════════════════════════════════════════════════════════════════════
         if binary == "nmap":
             args = self._apply_nmap_evasion(args, tool_name, spec)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # PROXY/IPS BYPASS: route via proxychains when FirewallAgent recommends it
+        # ══════════════════════════════════════════════════════════════════════
+        # This is a generic bypass mechanism for environments with IPS/WAF/rate limiting.
+        try:
+            evasion = self.memory.get_evasion_config()
+            use_proxy = bool(evasion.get("config", {}).get("use_proxy", False))
+        except Exception:
+            use_proxy = False
+        if use_proxy and binary not in {"dig", "host", "whois"}:
+            proxy_bin = None
+            try:
+                proxy_bin = self.tools.find("proxychains4") or self.tools.find("proxychains")
+            except Exception:
+                proxy_bin = shutil.which("proxychains4") or shutil.which("proxychains")
+            if proxy_bin:
+                # Run: proxychains4 <tool> <args...>
+                args = [binary] + args
+                binary = "proxychains4" if "proxychains4" in str(proxy_bin) else "proxychains"
         
         # ══════════════════════════════════════════════════════════════════════
         # TIMING RANDOMIZATION: Add ±20% jitter to avoid fingerprinting
@@ -660,10 +680,10 @@ class ReconAgent(BaseAgent):
             if not result.get("success", False) and error:
                 self.log_warning(f"{tool_name} failed: {error}")
 
-        output = output[:self.OUTPUT_TRUNCATE]
-        
         # VERBOSE: Log tool output
         self._verbose_tool_output(output)
+
+        output = output[:self.OUTPUT_TRUNCATE]
         
         self.memory.log_action(self.agent_name, tool_name, output[:200])
         return output
@@ -705,6 +725,16 @@ class ReconAgent(BaseAgent):
                     for flag in extra_flags:
                         if flag not in new_args:
                             new_args.append(flag)
+
+                    # If firewall agent recommended request delays, translate into nmap scan-delay.
+                    # This is a generic IPS/IDS bypass knob.
+                    try:
+                        delay = float(config.get("delay_between_requests", 0) or 0)
+                        if delay >= 0.5 and "--scan-delay" not in new_args:
+                            # nmap expects time units; keep it simple
+                            new_args.extend(["--scan-delay", f"{int(delay * 1000)}ms"])
+                    except Exception:
+                        pass
                     
                     return new_args
         except Exception as e:

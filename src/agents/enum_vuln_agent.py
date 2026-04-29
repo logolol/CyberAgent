@@ -130,6 +130,11 @@ class EnumVulnAgent(BaseAgent):
         self._firewall_detected: bool = False
         self.intelligence_log: list[dict[str, Any]] = []
         self._security_controls: dict[str, Any] = {}
+        self.force_llm_only = os.getenv("CA_FORCE_LLM_ONLY", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if not self.force_llm_only:
+            self.allow_deterministic_fallback = True
 
         # Warm the model NOW — before any agent logic runs
         # This ensures subsequent LLM calls find model already in RAM
@@ -265,9 +270,18 @@ class EnumVulnAgent(BaseAgent):
                 for port_info in known_ports:
                     self.all_results[f"port_{port_info.get('port', 0)}"] = port_info
 
-            # LLM-first autonomous loop (no deterministic chain)
-            initial_plan = self._plan_initial_attack()
-            self._enumeration_loop(initial_plan)
+            # Stage 2: deterministic baseline first (ports/services/vuln scans)
+            self._run_gather_phase()
+
+            # Stage 3: LLM refinement loop only when deterministic evidence is weak
+            if self.force_llm_only or not self._should_skip_llm_enum_loop():
+                initial_plan = self._plan_initial_attack()
+                self._enumeration_loop(initial_plan)
+            else:
+                self.log_info(
+                    "Deterministic gather produced strong evidence — "
+                    "skipping noisy LLM tool-planning loop"
+                )
             self._llm_failures = 0 if self.all_results else 1
             analysis = self._run_analysis_phase()
 
@@ -1260,6 +1274,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         # TRY LLM FIRST with timeout, THEN fall back to regex
         # This preserves AGI capability while avoiding blocking
         self.log_info("Attempting LLM vulnerability analysis (120s timeout)...")
+        deterministic_analysis = self._regex_analysis_fallback()
         
         try:
             raw = self._llm_with_timeout(prompt, timeout=120)
@@ -1269,7 +1284,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                     # Validate the LLM response has useful content
                     if analysis.get("ports") or analysis.get("vulnerabilities"):
                         self.log_info(f"✓ LLM analysis complete: {len(analysis.get('vulnerabilities', []))} vulns found")
-                        return analysis
+                        return self._merge_analysis_results(analysis, deterministic_analysis)
                     else:
                         self.log_warning("LLM returned empty analysis, falling back to regex")
         except Exception as e:
@@ -1277,7 +1292,140 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         
         # FALLBACK: Regex-based analysis
         self.log_info("Running regex-based vulnerability analysis (fallback)...")
-        return self._regex_analysis_fallback()
+        return deterministic_analysis
+
+    def _merge_analysis_results(
+        self,
+        llm_analysis: dict[str, Any],
+        deterministic_analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Merge LLM analysis with deterministic findings.
+        Deterministic critical findings are never dropped.
+        """
+        merged: dict[str, Any] = dict(llm_analysis or {})
+
+        # Merge ports
+        merged_ports: list[dict[str, Any]] = []
+        port_index: dict[tuple[int, str], int] = {}
+        for source in (
+            llm_analysis.get("ports", []) if isinstance(llm_analysis, dict) else [],
+            deterministic_analysis.get("ports", []) if isinstance(deterministic_analysis, dict) else [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    pnum = int(item.get("port", 0) or 0)
+                except Exception:
+                    continue
+                if not (1 <= pnum <= 65535):
+                    continue
+                proto = str(item.get("protocol", "tcp") or "tcp").lower()
+                key = (pnum, proto)
+                if key not in port_index:
+                    merged_ports.append(dict(item))
+                    port_index[key] = len(merged_ports) - 1
+                    continue
+                existing = merged_ports[port_index[key]]
+                if not existing.get("version") and item.get("version"):
+                    existing["version"] = item.get("version")
+                if not existing.get("service") and item.get("service"):
+                    existing["service"] = item.get("service")
+
+        # Merge vulnerabilities (favor deterministic confirmed/high-confidence findings)
+        severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        vuln_map: dict[tuple[str, str, int], dict[str, Any]] = {}
+
+        def _vuln_key(v: dict[str, Any]) -> tuple[str, str, int]:
+            cve = str(v.get("cve", "CVE-UNKNOWN")).upper()
+            service = str(v.get("service", "unknown")).lower()
+            try:
+                port = int(v.get("port", 0) or 0)
+            except Exception:
+                port = 0
+            return cve, service, port
+
+        for source in (
+            llm_analysis.get("vulnerabilities", []) if isinstance(llm_analysis, dict) else [],
+            deterministic_analysis.get("vulnerabilities", []) if isinstance(deterministic_analysis, dict) else [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for vuln in source:
+                if not isinstance(vuln, dict):
+                    continue
+                key = _vuln_key(vuln)
+                existing = vuln_map.get(key)
+                if not existing:
+                    vuln_map[key] = dict(vuln)
+                    continue
+                old_sev = severity_rank.get(str(existing.get("severity", "info")).lower(), 0)
+                new_sev = severity_rank.get(str(vuln.get("severity", "info")).lower(), 0)
+                if new_sev > old_sev:
+                    existing["severity"] = vuln.get("severity")
+                    existing["cvss_score"] = vuln.get("cvss_score", existing.get("cvss_score", 0))
+                if vuln.get("confirmed"):
+                    existing["confirmed"] = True
+                if vuln.get("exploitable"):
+                    existing["exploitable"] = True
+                if not existing.get("version") and vuln.get("version"):
+                    existing["version"] = vuln.get("version")
+                if not existing.get("evidence") and vuln.get("evidence"):
+                    existing["evidence"] = vuln.get("evidence")
+                if not existing.get("title") and vuln.get("title"):
+                    existing["title"] = vuln.get("title")
+
+        merged["ports"] = merged_ports
+        merged["vulnerabilities"] = list(vuln_map.values())
+
+        # Merge misconfigurations
+        misconfigs: list[dict[str, Any]] = []
+        seen_misconfigs: set[str] = set()
+        for source in (
+            llm_analysis.get("misconfigurations", []) if isinstance(llm_analysis, dict) else [],
+            deterministic_analysis.get("misconfigurations", []) if isinstance(deterministic_analysis, dict) else [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for mis in source:
+                if not isinstance(mis, dict):
+                    continue
+                key = "|".join(
+                    [
+                        str(mis.get("type", "")),
+                        str(mis.get("service", "")),
+                        str(mis.get("detail", "")),
+                    ]
+                ).lower()
+                if key in seen_misconfigs:
+                    continue
+                seen_misconfigs.add(key)
+                misconfigs.append(dict(mis))
+        if misconfigs:
+            merged["misconfigurations"] = misconfigs
+
+        # Merge MITRE chain
+        mitre_chain: list[str] = []
+        seen_mitre: set[str] = set()
+        for source in (
+            llm_analysis.get("mitre_chain", []) if isinstance(llm_analysis, dict) else [],
+            deterministic_analysis.get("mitre_chain", []) if isinstance(deterministic_analysis, dict) else [],
+        ):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                tid = str(item).strip()
+                if not tid or tid in seen_mitre:
+                    continue
+                seen_mitre.add(tid)
+                mitre_chain.append(tid)
+        if mitre_chain:
+            merged["mitre_chain"] = mitre_chain
+
+        return merged
 
     def _plan_initial_attack(self) -> dict[str, Any]:
         """
@@ -1607,6 +1755,24 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         # VERBOSE: Log tool call before execution
         self._verbose_tool_call(tool_name, args)
 
+        # ══════════════════════════════════════════════════════════════════════
+        # PROXY/IPS BYPASS: route selected tools via proxychains when recommended
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            evasion = self.memory.get_evasion_config()
+            use_proxy = bool(evasion.get("config", {}).get("use_proxy", False))
+        except Exception:
+            use_proxy = False
+        if use_proxy and tool_name not in {"dig", "host", "whois"}:
+            proxy_bin = None
+            try:
+                proxy_bin = self.tools.find("proxychains4") or self.tools.find("proxychains")
+            except Exception:
+                proxy_bin = None
+            if proxy_bin:
+                args = [tool_name] + args
+                tool_name = "proxychains4" if "proxychains4" in str(proxy_bin) else "proxychains"
+
         result = self.tools.use(
             tool_name=tool_name,
             args=args,
@@ -1629,7 +1795,7 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             result=str(output)[:300],
         )
 
-        return tool_name, str(output)[:8000]
+        return tool_name, str(output)[:20000]
 
     def _resolve_spec(self, spec: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1638,8 +1804,18 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         purpose = str(spec.get("purpose", "")).strip()
         approach = str(spec.get("approach", "")).strip()
         target = str(spec.get("target", self.target)).strip() or self.target
-        if target.lower() in ("ip", "target", "target_ip", "<target_ip>", "{target}", "{ip}"):
+        purpose_lower = purpose.lower()
+        target_lower = target.lower()
+        if target_lower in ("ip", "target", "target_ip", "<target_ip>", "{target}", "{ip}"):
             target = self.target
+        if any(tok in target_lower for tok in ("example.com", "<target", "<ip", "{ip}", "/path/to", "<web_server_url>", "<ftp_server_url>")):
+            target = self.target
+        if re.match(r"^https?://", target, re.IGNORECASE):
+            host = re.sub(r"^https?://", "", target, flags=re.IGNORECASE).split("/", 1)[0].strip()
+            if host and "example.com" not in host.lower() and "<" not in host:
+                target = host
+            else:
+                target = self.target
 
         best_tool = str(spec.get("tool_hint", "")).strip().split()[0]
         try:
@@ -1653,6 +1829,23 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                     break
         except Exception as e:
             self.log_warning(f"Tool candidate resolution failed for '{purpose}': {e}")
+
+        WEB_TOOLS = {"dirb", "dirsearch", "gobuster", "ffuf", "nikto", "wfuzz"}
+        NON_WEB_SERVICE_HINTS = (
+            "ftp", "ssh", "telnet", "smtp", "dns", "domain", "rpc",
+            "nfs", "smb", "mysql", "postgres", "irc", "vnc"
+        )
+        WEB_HINTS = ("http", "https", "web", "directory", "endpoint", "path", "vhost")
+
+        if any(h in purpose_lower for h in NON_WEB_SERVICE_HINTS) and best_tool in WEB_TOOLS:
+            best_tool = "nmap"
+        elif any(h in purpose_lower for h in WEB_HINTS) and best_tool in {"nmap", "hydra", ""}:
+            if self.tools.find("gobuster"):
+                best_tool = "gobuster"
+            elif self.tools.find("ffuf"):
+                best_tool = "ffuf"
+            elif self.tools.find("dirb"):
+                best_tool = "dirb"
 
         if not best_tool:
             best_tool = "nmap"
@@ -1721,6 +1914,14 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                         for flag in config.get("nmap_flags", []):
                             if flag not in base_args:
                                 base_args.append(flag)
+
+                        # Translate recommended delays into nmap scan-delay for IPS/WAF bypass.
+                        try:
+                            delay = float(config.get("delay_between_requests", 0) or 0)
+                            if delay >= 0.5 and "--scan-delay" not in base_args:
+                                base_args.extend(["--scan-delay", f"{int(delay * 1000)}ms"])
+                        except Exception:
+                            pass
                         
                         return base_args
             except Exception:
@@ -1729,6 +1930,30 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             # Default: -T4 timing
             base_args.append("-T4")
             return base_args
+
+        def _normalize_web_target(raw_target: str, purpose_text: str = "") -> str:
+            value = str(raw_target or "").strip()
+            low = value.lower()
+            if not value or any(
+                tok in low
+                for tok in (
+                    "example.com",
+                    "<target",
+                    "<web_server_url>",
+                    "<ftp_server_url>",
+                    "/path/to",
+                )
+            ):
+                value = self.target
+            if re.match(r"^https?://", value, re.IGNORECASE):
+                return value.rstrip("/") + "/"
+            scheme = "https" if "https" in purpose_text.lower() or ":443" in value else "http"
+            return f"{scheme}://{value.rstrip('/')}/"
+
+        def _dirb_args(target: str, purpose: str = "", **_) -> list[str]:
+            base_url = _normalize_web_target(target, purpose)
+            return [base_url, "/usr/share/wordlists/dirb/common.txt", "-S"]
+
         def _web_brute_args_with_rag(target: str, tool: str = "gobuster", purpose: str = "", **_) -> list[str]:
             """
             P2-2: Adaptive wordlists.
@@ -1773,9 +1998,11 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                     self.log_warning(f"Failed to create temp wordlist: {e}")
             
             if tool == "gobuster":
-                return ["dir", "-u", f"http://{target}", "-w", wordlist_path, "-t", "20", "-q"]
+                url = _normalize_web_target(target, purpose).rstrip("/")
+                return ["dir", "-u", url, "-w", wordlist_path, "-t", "20", "-q"]
             else: # ffuf
-                return ["-u", f"http://{target}/FUZZ", "-w", wordlist_path, "-t", "20", "-s"]
+                url = _normalize_web_target(target, purpose).rstrip("/")
+                return ["-u", f"{url}/FUZZ", "-w", wordlist_path, "-t", "20", "-s"]
 
         DETERMINISTIC_TOOLS = {
             "nmap": _nmap_args_with_evasion,
@@ -1783,6 +2010,12 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             "smbclient":  lambda target, **_: ["-L", f"//{target}/", "-N"],
             "smbmap":     lambda target, **_: ["-H", target],
             "nikto":      lambda target, **_: ["-h", f"http://{target}", "-Tuning", "13"],
+            "dirb":       lambda target, purpose="", **_: _dirb_args(target, purpose),
+            "dirsearch":  lambda target, purpose="", **_: [
+                "-u", _normalize_web_target(target, purpose).rstrip("/"),
+                "-w", "/usr/share/wordlists/dirb/common.txt",
+                "-q",
+            ],
             "gobuster":   lambda target, purpose="", **_: _web_brute_args_with_rag(target, "gobuster", purpose),
             "ffuf":       lambda target, purpose="", **_: _web_brute_args_with_rag(target, "ffuf", purpose),
             "hydra":      lambda target, **_: [
@@ -1800,6 +2033,28 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
         port_match = re.search(r'\bport\s+(\d+)\b', purpose, re.IGNORECASE)
         if port_match:
             port_hint = port_match.group(1)
+        else:
+            service_port_hints = {
+                "ftp": "21",
+                "ssh": "22",
+                "telnet": "23",
+                "smtp": "25",
+                "domain": "53",
+                "dns": "53",
+                "rpc": "111",
+                "nfs": "2049",
+                "smb": "445",
+                "netbios": "445",
+                "mysql": "3306",
+                "postgres": "5432",
+                "vnc": "5900",
+                "irc": "6667",
+                "tomcat": "8180",
+            }
+            for svc_kw, svc_port in service_port_hints.items():
+                if svc_kw in purpose_lower:
+                    port_hint = svc_port
+                    break
 
         if best_tool in DETERMINISTIC_TOOLS:
             try:
@@ -1819,14 +2074,20 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
 
         # FIX 9: Reduced timeout from 240s to 45s (arg resolution)
         raw = self._llm_with_timeout(arg_prompt, timeout=45)
-        args = self._extract_args_from_llm(raw, target)
+        args = self._extract_args_from_llm(raw, target, best_tool, purpose)
 
         spec["_resolved_args"] = args
         spec["_timeout"] = self._get_tool_timeout(purpose)
         self.log_info(f"  → {best_tool} {' '.join(str(a) for a in args[:5])}")
         return spec
 
-    def _extract_args_from_llm(self, raw: str, target: str) -> list[str]:
+    def _extract_args_from_llm(
+        self,
+        raw: str,
+        target: str,
+        tool_name: str = "",
+        purpose: str = "",
+    ) -> list[str]:
         """
         Extract command arguments from LLM JSON-array output.
         Never raises; falls back to [target].
@@ -1843,9 +2104,38 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
                     resolved: list[str] = []
                     for value in parsed:
                         item = str(value)
-                        item = item.replace("{target}", target).replace("TARGET", target)
+                        item = (
+                            item.replace("{target}", target)
+                            .replace("{ip}", target)
+                            .replace("TARGET", target)
+                            .replace("target_ip", target)
+                            .replace("<target_ip>", target)
+                            .replace("<ip>", target)
+                        )
+                        if "example.com" in item.lower() or "<" in item or "/path/to" in item.lower():
+                            item = target
                         resolved.append(item)
-                    return resolved if resolved else [target]
+                    if not resolved:
+                        return [target]
+
+                    # Ensure target is present for scanner tools
+                    tool_lower = (tool_name or "").lower()
+                    if tool_lower in {"nmap", "nikto"} and not any(target == a or a.endswith(target) for a in resolved):
+                        resolved.append(target)
+
+                    # Keep web-enum tools bound to HTTP/HTTPS URLs only
+                    if tool_lower in {"dirb", "gobuster", "ffuf", "dirsearch"}:
+                        if not any(str(a).startswith(("http://", "https://")) for a in resolved):
+                            url = f"http://{target}"
+                            if tool_lower == "gobuster":
+                                return ["dir", "-u", url, "-w", "/usr/share/wordlists/dirb/common.txt", "-q"]
+                            if tool_lower == "ffuf":
+                                return ["-u", f"{url}/FUZZ", "-w", "/usr/share/wordlists/dirb/common.txt", "-s"]
+                            if tool_lower == "dirsearch":
+                                return ["-u", url, "-w", "/usr/share/wordlists/dirb/common.txt", "-q"]
+                            return [f"{url}/", "/usr/share/wordlists/dirb/common.txt", "-S"]
+
+                    return resolved
             except Exception:
                 pass
         return [target]
@@ -2146,6 +2436,21 @@ Max {self.MAX_CONCURRENT} tools. Only use tools from available list."""
             })
 
         tool_evidence = self._build_full_output_summary()
+        tool_evidence_upper = tool_evidence.upper()
+
+        def _is_grounded_exploitable(v: dict[str, Any]) -> bool:
+            cve = str(v.get("cve", "")).upper()
+            if cve.startswith("CVE-") and cve in tool_evidence_upper:
+                return True
+            if bool(v.get("confirmed")):
+                return True
+            if bool(v.get("exploit_available")):
+                return True
+            title = str(v.get("title", "")).lower()
+            evidence = str(v.get("evidence", "")).lower()
+            high_signal = ("backdoor", "bindshell", "anonymous ftp", "nuclei confirmed")
+            return any(sig in title or sig in evidence for sig in high_signal)
+
         prompt = f"""Evaluate exploitability of these vulnerabilities
 found on a Linux target during authorized penetration testing.
 
@@ -2241,8 +2546,9 @@ Use only evidence above — do not invent:
                 item = result_map.get(idx, {})
                 confidence = str(item.get("confidence", "low")).lower()
                 llm_exploitable = bool(item.get("exploitable", False))
+                grounded = _is_grounded_exploitable(vuln)
 
-                if llm_exploitable and confidence in ["high", "medium"]:
+                if llm_exploitable and confidence in ["high", "medium"] and grounded:
                     vuln["exploitable"] = True
                     vuln["confidence"] = confidence
                     vuln["exploitability_reasoning"] = str(item.get("reasoning", ""))
@@ -2282,7 +2588,8 @@ Use only evidence above — do not invent:
                 cve = str(vuln.get("cve", ""))
                 severity = str(vuln.get("severity", "")).lower()
                 confirmed = bool(vuln.get("confirmed"))
-                if (cvss >= 7.0 and cve.startswith("CVE-")) or (
+                grounded_cve = cve.startswith("CVE-") and cve.upper() in tool_evidence_upper
+                if (cvss >= 7.0 and grounded_cve) or (
                     confirmed and severity in ["critical", "high"]
                 ):
                     vuln["exploitable"] = True
@@ -2759,13 +3066,13 @@ Return JSON:
         return found
 
     def _summarize_batch_for_llm(self, results: dict[str, str]) -> str:
-        """Compact tool output summary (max 500 chars) - FIX 9."""
+        """Compact but information-rich tool output summary for LLM analysis."""
         blocks: list[str] = []
         for key, output in results.items():
-            preview = (output or "").replace("\n", " ")[:150]  # Reduced from 300
+            preview = (output or "").replace("\n", " ")[:450]
             blocks.append(f"{key}:\n{preview}\n")
         summary = "\n".join(blocks)
-        return summary[:500]  # FIX 9: Reduced from 1500
+        return summary[:3000]
 
     def _extract_versions_from_all_outputs(self) -> dict[str, str]:
         """Convenience wrapper to extract versions from accumulated outputs."""
@@ -3083,6 +3390,32 @@ Return JSON:
                 return True
         return False
 
+    def _should_skip_llm_enum_loop(self) -> bool:
+        """
+        Decide whether deterministic gather already produced enough signal.
+        """
+        port_services = self._extract_port_services()
+        if not port_services:
+            return False
+
+        high_risk_ports = {21, 23, 139, 445, 512, 513, 514, 1099, 1524, 2049, 3306, 5432, 5900, 6667, 8180}
+        if any(p in high_risk_ports for p in port_services.keys()):
+            return True
+
+        if len(port_services) >= 8:
+            return True
+
+        all_output = "\n".join(str(v) for v in self.all_results.values()).lower()
+        signatures = [
+            "vsftpd 2.3.4",
+            "samba 3.0.",
+            "unrealircd",
+            "distccd",
+            "anonymous ftp login allowed",
+            "backdoor",
+        ]
+        return any(sig in all_output for sig in signatures)
+
     def _run_subprocess_fallback(
         self,
         tool_hint: str,
@@ -3316,6 +3649,9 @@ Return JSON:
                 text = str(hit.get("text", ""))
                 cve_match = re.search(r"CVE-(\d{4})-(\d{4,7})", text)
                 if not cve_match:
+                    continue
+                # Keep only CVEs whose affected-version text matches detected service version.
+                if version and not self._version_matches(version, text):
                     continue
                 cve_id = f"CVE-{cve_match.group(1)}-{cve_match.group(2)}"
                 if cve_id in seen_cves:

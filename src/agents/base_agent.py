@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 # ── Path bootstrap ────────────────────────────────────────────────────────────
@@ -108,6 +109,9 @@ class BaseAgent:
         self.console = Console(force_terminal=True)
         self.logger = logging.getLogger(f"agent.{agent_name}")
         self.max_iterations = max_react_iterations
+        # Agents may explicitly opt in to a narrow set of wrapper actions
+        # (e.g. python3/ruby for exploit script execution).
+        self.allowed_wrapper_actions: set[str] = set()
         # Default is LLM-only mode (no deterministic fallback chains).
         self.allow_deterministic_fallback = os.getenv(
             "CA_ALLOW_DETERMINISTIC_FALLBACK", "0"
@@ -507,30 +511,31 @@ class BaseAgent:
     def _verbose(self, action: str, message: str) -> None:
         """Print verbose log line if CA_VERBOSE is set."""
         if is_verbose():
+            safe_message = escape(str(message))
             self.console.print(
-                f"[dim cyan][VERBOSE][{self.agent_name}][{action}][/] {message}"
+                f"[dim cyan][VERBOSE][{self.agent_name}][{action}][/] {safe_message}"
             )
 
     def _verbose_tool_call(self, tool: str, args: list | str) -> None:
         """Log tool call before execution."""
         if is_verbose():
             args_str = ' '.join(str(a) for a in args) if isinstance(args, list) else str(args)
-            self._verbose("TOOL_CALL", f"{tool} {args_str[:400]}")
+            self._verbose("TOOL_CALL", f"{tool} {args_str}")
 
     def _verbose_tool_output(self, output: str) -> None:
         """Log tool output after execution."""
         if is_verbose():
-            self._verbose("TOOL_OUTPUT", output[:500].replace('\n', ' '))
+            self._verbose("TOOL_OUTPUT", f"\n{output}")
 
     def _verbose_llm_prompt(self, prompt: str) -> None:
         """Log LLM prompt before call."""
         if is_verbose():
-            self._verbose("LLM_PROMPT", prompt[:300].replace('\n', ' '))
+            self._verbose("LLM_PROMPT", f"\n{prompt}")
 
     def _verbose_llm_response(self, response: str) -> None:
         """Log LLM response after call."""
         if is_verbose():
-            self._verbose("LLM_RESPONSE", response[:300].replace('\n', ' '))
+            self._verbose("LLM_RESPONSE", f"\n{response}")
 
     def _verbose_llm_timeout(self, timeout_secs: int) -> None:
         """Log LLM timeout."""
@@ -859,7 +864,7 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         normalized = str(action or "").strip().lower()
         if not normalized:
             return False
-        if normalized in self.BLOCKED_ACTIONS:
+        if normalized in self.BLOCKED_ACTIONS and normalized not in self.allowed_wrapper_actions:
             return False
         if normalized in self.INTERNAL_ACTIONS:
             return True
@@ -1023,7 +1028,7 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
         """
         action = action.strip().lower()
         action_input = action_input or {}
-        if action in self.BLOCKED_ACTIONS:
+        if action in self.BLOCKED_ACTIONS and action not in self.allowed_wrapper_actions:
             return {"error": f"Blocked unsafe action: {action}", "tool": action}
 
         if action == "search_rag":
@@ -1533,7 +1538,10 @@ FINAL_ANSWER: {"success": true, "findings": []}  ← WRONG! No actions taken!
                 # CHECK 1 — CVE format
                 if isinstance(v, str):
                     for cve in re.findall(r"CVE-[\w-]+", v, re.IGNORECASE):
-                        if not re.match(r"^CVE-\d{4}-\d{4,7}$", cve.upper()):
+                        cve_upper = cve.upper()
+                        if cve_upper in ("CVE-UNKNOWN", "CVE-UNVERIFIED"):
+                            continue
+                        if not re.match(r"^CVE-\d{4}-\d{4,7}$", cve_upper):
                             obj[k] = v.replace(cve, "CVE-INVALID-REMOVED")
                             flags.append(f"invalid_cve_format:{cve}")
                             rejection_count += 1

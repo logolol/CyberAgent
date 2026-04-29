@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -106,14 +107,18 @@ class OrchestratorAgent(BaseAgent):
     Delegates work to specialist agents and reacts to their findings.
     """
 
-    # Ordered attack chain — phases run in this sequence
+    # Ordered attack chain — phases run in this sequence.
+    #
+    # NOTE: We intentionally run post-exploitation immediately after initial
+    # exploitation (even before privesc) so that newly harvested credentials,
+    # internal routes, and pivot targets can feed back into exploitation.
     ATTACK_CHAIN = [
         "firewall",
         "recon",
         "enumeration",
         "exploitation",
-        "privesc",
         "postexploit",
+        "privesc",
         "mitigation",
         "reporting",
     ]
@@ -161,6 +166,7 @@ class OrchestratorAgent(BaseAgent):
         self.mission_intelligence: dict = {
             "phases_completed": [],
             "confirmed_hosts": [],
+            "confirmed_subdomains": [],
             "confirmed_services": {},
             "confirmed_vulns": [],
             "exploitable_vulns": [],
@@ -314,6 +320,15 @@ class OrchestratorAgent(BaseAgent):
             for h in hosts_found:
                 if h and h not in self.mission_intelligence["confirmed_hosts"]:
                     self.mission_intelligence["confirmed_hosts"].append(h)
+
+        # Accumulate subdomains from recon (domain targets only)
+        if phase == "recon":
+            subs = result.get("subdomains", [])
+            if isinstance(subs, list) and subs:
+                for s in subs:
+                    s = str(s).strip().lower()
+                    if s and s not in self.mission_intelligence["confirmed_subdomains"]:
+                        self.mission_intelligence["confirmed_subdomains"].append(s)
 
         # Accumulate services (from enumeration)
         if phase == "enumeration":
@@ -786,6 +801,12 @@ Return JSON only:
         # ── STEP 3: Execute attack chain ──────────────────────────────────────
         phases_to_run = self._get_phases_to_run(phase)
 
+        # Adaptive exploitation/post-exploitation loop limits
+        exploit_loops_done = 0
+        max_exploit_loops = int(os.getenv("CA_EXPLOIT_POSTEXPLOIT_LOOPS", "1") or 1)
+        max_exploit_loops = max(0, min(max_exploit_loops, 3))
+
+        creds_before_postexploit = 0
         for phase_name in phases_to_run:
             self.current_phase = phase_name
 
@@ -829,10 +850,17 @@ Return JSON only:
             intel_summary = json.dumps(briefing, default=str)[:200] if briefing else "none"
             self._verbose_phase_transition(prev_phase, phase_name, intel_summary)
 
-            # Instantiate and run specialist agent
+            # Instantiate and run specialist agent (with adaptive loops for exploit↔postexploit)
             agent = self._get_agent(phase_name)
             self.log_info(f"Delegating to {agent.agent_name} for phase '{phase_name}'...")
             import sys; sys.stdout.flush()
+
+            # Snapshot pre-state for adaptive loops
+            if phase_name == "postexploit":
+                try:
+                    creds_before_postexploit = len(self.mission_intelligence.get("credentials_found", []) or [])
+                except Exception:
+                    creds_before_postexploit = 0
 
             try:
                 result = agent.run(target=target, briefing=briefing)
@@ -893,9 +921,100 @@ Return JSON only:
             if analysis.get("critical_finding"):
                 self._update_attack_strategy(analysis)
 
+            # ── Adaptive loop: exploitation → postexploit → exploitation ─────
+            # Goal: once we get initial foothold, harvest creds/routes/pivots and
+            # immediately feed them back into exploitation without waiting for privesc.
+            if phase_name == "postexploit" and exploit_loops_done < max_exploit_loops:
+                try:
+                    prev_creds = int(creds_before_postexploit or 0)
+                    new_creds = len(self.mission_intelligence.get("credentials_found", []) or [])
+                    if new_creds > prev_creds:
+                        self.log_info(
+                            f"[LOOP] Post-exploit harvested new creds ({prev_creds}→{new_creds}); re-running exploitation"
+                        )
+                    else:
+                        # Still loop once if we have any shells; pivot discovery can still help
+                        if not (self.mission_intelligence.get("shells_obtained") or []):
+                            continue
 
-        # ── STEP 4: Mission summary ───────────────────────────────────────────
+                    exploit_loops_done += 1
+                    loop_phase = "exploitation"
+                    loop_agent = self._get_agent(loop_phase)
+                    loop_brief = self._build_agent_briefing(loop_phase)
+                    loop_result = loop_agent.run(target=target, briefing=loop_brief)
+                    # Store loop result under a distinct key but also accumulate into mission_intelligence
+                    self.phase_results[f"{loop_phase}_loop_{exploit_loops_done}"] = loop_result
+                    self._accumulate_phase_intelligence(loop_phase, loop_result)
+                except Exception as e:
+                    self.log_warning(f"[LOOP] exploit↔postexploit loop failed: {e}")
+
+
+        # ── STEP 4: Subdomain campaign (domain targets only) ──────────────────
+        try:
+            self._run_subdomain_campaign(parent_target=target, phase_scope=phase)
+        except Exception as e:
+            self.log_warning(f"Subdomain campaign error: {e}")
+
+        # ── STEP 5: Mission summary ───────────────────────────────────────────
         return self._print_summary(target)
+
+    def _run_subdomain_campaign(self, parent_target: str, phase_scope: str) -> None:
+        """
+        After completing the main target, run recon→enum→exploit on discovered
+        subdomains (but DO NOT do subdomain enumeration for IP-only targets).
+        """
+        # Only for domains (simple heuristic)
+        if not parent_target or parent_target.replace(".", "").isdigit():
+            return
+        if "." not in parent_target:
+            return
+        # Honor single-phase runs (don't spawn extra targets)
+        if phase_scope != "full":
+            return
+
+        subs = list(self.mission_intelligence.get("confirmed_subdomains", []) or [])
+        if not subs:
+            return
+
+        # Prioritize likely high-value subdomains first
+        def _score(s: str) -> tuple[int, int, str]:
+            low = s.lower()
+            key = 9
+            if any(p in low for p in ("admin.", "vpn.", "sso.", "auth.", "api.", "dev.", "staging.")):
+                key = 0
+            elif any(p in low for p in ("git", "jira", "jenkins", "grafana", "kibana", "portal")):
+                key = 1
+            return (key, len(low), low)
+
+        subs = sorted({s for s in subs if s and s.endswith(parent_target)}, key=_score)[:15]
+        if not subs:
+            return
+
+        self.console.print(Panel(
+            f"[bold cyan]▶  SUBDOMAIN CAMPAIGN[/]\n"
+            f"[white]Parent:[/] {parent_target}\n"
+            f"[white]Subdomains:[/] {len(subs)} queued",
+            border_style="cyan",
+        ))
+
+        # Run limited phases on each subdomain: recon→enumeration→exploitation
+        for sub in subs:
+            self.console.print(Panel(
+                f"[bold cyan]▶  SUBTARGET: {sub}[/]",
+                border_style="blue",
+            ))
+            for phase_name in ("recon", "enumeration", "exploitation"):
+                try:
+                    agent = self._get_agent(phase_name)
+                    brief = self._build_agent_briefing(phase_name)
+                    # Tag as subtarget so agents can adjust behavior if they want
+                    brief["campaign"] = {"type": "subdomain", "parent": parent_target, "subtarget": sub}
+                    result = agent.run(target=sub, briefing=brief)
+                    self.phase_results[f"{phase_name}::{sub}"] = result
+                    self._accumulate_phase_intelligence(phase_name, result)
+                except Exception as e:
+                    self.log_warning(f"Subdomain {sub} phase {phase_name} failed: {e}")
+                    continue
 
     # ── Firewall Detection (Pre-Recon) ────────────────────────────────────────
 
