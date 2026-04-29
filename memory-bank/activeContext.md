@@ -2,11 +2,25 @@
 
 **Last Updated:** 2026-04-27 (Day 19 - Cognitive Loop & Evasion)
 
+## 2026-04-29: Command Reference & Documentation Complete
+
+Added comprehensive **pentest-commands.md** guide with:
+- ✅ **Quick-start command**: `python3 main.py --target victim-machine --verbose --phase full`
+- ✅ **All phase commands**: Individual commands for each attack stage
+- ✅ **Resume/recovery**: Commands to pause and resume missions
+- ✅ **Troubleshooting**: Common issues and fixes
+- ✅ **Setup checklist**: One-time environment validation
+
+### Key Resource:
+📖 See `memory-bank/pentest-commands.md` for full command reference.
+
+---
+
 ## 2026-04-27: Cognitive Loop, Firewall Evasion, and YAML Mitigations
 
 We have moved from a linear, deterministic pentesting flow to a truly autonomous cognitive loop that handles adversarial environments and provides executable mitigation playbooks.
 
-### Current focus:
+### Completed:
 - ✅ **Phase-Gate Critique**: Orchestrator now uses a critic loop to verify results before moving forward.
 - ✅ **Firewall Evasion**: All agents now adapt their tool flags based on Phase 0 firewall detection.
 - ✅ **Ansible Playbooks**: MitigationAgent now produces production-ready YAML instead of fragile bash scripts.
